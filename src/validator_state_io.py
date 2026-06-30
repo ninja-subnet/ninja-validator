@@ -128,6 +128,66 @@ def _record_commitment_acceptance(state: dict[str, Any], submission: dict[str, A
         seen.append(hotkey)
 
 
+def _submission_current_for_registration(
+    submission: dict[str, Any],
+    registration_block: int,
+) -> bool:
+    try:
+        return int(submission.get("commitment_block")) >= int(registration_block)
+    except (TypeError, ValueError):
+        return False
+
+
+def _state_has_current_submission_for_hotkey(
+    state: dict[str, Any],
+    *,
+    hotkey: str,
+    registration_block: int,
+) -> bool:
+    current_king = state.get("current_king")
+    if (
+        isinstance(current_king, dict)
+        and str(current_king.get("hotkey") or "") == hotkey
+        and _submission_current_for_registration(current_king, registration_block)
+    ):
+        return True
+
+    for key in ("queue", "recent_kings"):
+        entries = state.get(key, [])
+        if not isinstance(entries, list):
+            continue
+        for entry in entries:
+            if (
+                isinstance(entry, dict)
+                and str(entry.get("hotkey") or "") == hotkey
+                and _submission_current_for_registration(entry, registration_block)
+            ):
+                return True
+
+    active_duel = state.get("active_duel")
+    if isinstance(active_duel, dict):
+        for key in ("king", "challenger"):
+            entry = active_duel.get(key)
+            if (
+                isinstance(entry, dict)
+                and str(entry.get("hotkey") or "") == hotkey
+                and _submission_current_for_registration(entry, registration_block)
+            ):
+                return True
+    return False
+
+
+def _state_has_spent_marker_for_hotkey(state: dict[str, Any], hotkey: str) -> bool:
+    locked = state.get("locked_commitments", {})
+    if isinstance(locked, dict) and hotkey in locked:
+        return True
+    for key in ("seen_hotkeys", "retired_hotkeys", "disqualified_hotkeys"):
+        values = state.get(key, [])
+        if isinstance(values, list) and any(str(value) == hotkey for value in values):
+            return True
+    return False
+
+
 def _clear_stale_spent_state_for_reregistered_hotkey(
     state: dict[str, Any],
     *,
@@ -142,7 +202,17 @@ def _clear_stale_spent_state_for_reregistered_hotkey(
         prior_block_int = int(prior_block) if prior_block is not None else None
     except (TypeError, ValueError):
         prior_block_int = None
-    if prior_block_int is None or prior_block_int >= int(registration_block):
+    if prior_block_int is None:
+        if (
+            not _state_has_spent_marker_for_hotkey(state, hotkey)
+            or _state_has_current_submission_for_hotkey(
+                state,
+                hotkey=hotkey,
+                registration_block=registration_block,
+            )
+        ):
+            return
+    elif prior_block_int >= int(registration_block):
         return
 
     locked = state.get("locked_commitments", {})

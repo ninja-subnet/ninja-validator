@@ -62,6 +62,39 @@ class ValidatorStateIoTest(unittest.TestCase):
                 enqueue_private_submission_in_state(state_path=state_path, submission=submission)
             )
 
+    def test_enqueue_clears_stale_disqualification_without_prior_block(self) -> None:
+        with TemporaryDirectory() as tmp:
+            state_path = Path(tmp) / "state.json"
+            state_path.write_text(
+                json.dumps(
+                    {
+                        "queue": [],
+                        "locked_commitments": {},
+                        "commitment_blocks_by_hotkey": {},
+                        "seen_hotkeys": [],
+                        "retired_hotkeys": [],
+                        "disqualified_hotkeys": ["hk-reregistered"],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            submission = private_submission_validator_queue_entry(
+                hotkey="hk-reregistered",
+                submission_id="sub-new",
+                agent_sha256="deadbeef",
+                registration_block=200,
+                uid=7,
+            )
+
+            self.assertTrue(
+                enqueue_private_submission_in_state(state_path=state_path, submission=submission)
+            )
+
+            payload = json.loads(state_path.read_text(encoding="utf-8"))
+            self.assertEqual(payload["disqualified_hotkeys"], [])
+            self.assertEqual(payload["queue"][0]["commitment"], submission["commitment"])
+            self.assertEqual(payload["commitment_blocks_by_hotkey"]["hk-reregistered"], 200)
+
     def test_record_acceptance_enqueues_when_state_path_provided(self) -> None:
         with TemporaryDirectory() as tmp:
             root = Path(tmp) / "private-submissions"
@@ -184,6 +217,56 @@ class ValidatorStateIoTest(unittest.TestCase):
 
         self.assertEqual(added, 0)
         self.assertEqual(memory.queue, [])
+
+    def test_merge_clears_stale_disqualification_without_prior_block(self) -> None:
+        disk_entry = private_submission_validator_queue_entry(
+            hotkey="hk-reregistered",
+            submission_id="sub-new",
+            agent_sha256="deadbeef",
+            registration_block=200,
+            uid=160,
+        )
+        disk = ValidatorState.from_dict({"queue": [disk_entry]})
+        memory = ValidatorState(disqualified_hotkeys=["hk-reregistered"])
+        config = RunConfig()
+
+        with (
+            patch("validate._uid_for_hotkey_on_subnet", return_value=160),
+            patch("validate._current_registration_block", return_value=200),
+        ):
+            added = _merge_queued_submissions_from_disk_state(
+                memory,
+                disk,
+                config=config,
+                subtensor=object(),
+            )
+
+        self.assertEqual(added, 1)
+        self.assertEqual(memory.disqualified_hotkeys, [])
+        self.assertEqual(memory.queue[0].commitment, disk_entry["commitment"])
+
+    def test_stale_clear_keeps_current_submission_when_prior_block_missing(self) -> None:
+        entry = private_submission_validator_queue_entry(
+            hotkey="hk-current",
+            submission_id="sub-current",
+            agent_sha256="deadbeef",
+            registration_block=200,
+            uid=160,
+        )
+        submission = ValidatorSubmission.from_dict(entry)
+        state = ValidatorState(
+            queue=[submission],
+            disqualified_hotkeys=["hk-current"],
+        )
+
+        changed = _clear_stale_spent_state_for_reregistered_hotkey(
+            state,
+            hotkey="hk-current",
+            registration_block=200,
+        )
+
+        self.assertFalse(changed)
+        self.assertEqual(state.disqualified_hotkeys, ["hk-current"])
 
     def test_refresh_queue_drops_dueled_and_disqualified_entries(self) -> None:
         dueled = ValidatorSubmission.from_dict(

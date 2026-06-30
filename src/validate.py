@@ -7116,6 +7116,45 @@ def _record_spent_commitment(
         state.seen_hotkeys.append(hotkey)
 
 
+def _state_submissions_for_hotkey(
+    state: ValidatorState,
+    hotkey: str,
+) -> list[ValidatorSubmission]:
+    submissions: list[ValidatorSubmission] = []
+    if state.current_king is not None and state.current_king.hotkey == hotkey:
+        submissions.append(state.current_king)
+    submissions.extend(submission for submission in state.recent_kings if submission.hotkey == hotkey)
+    submissions.extend(submission for submission in state.queue if submission.hotkey == hotkey)
+    if state.active_duel is not None:
+        submissions.extend(
+            submission
+            for submission in (state.active_duel.king, state.active_duel.challenger)
+            if submission.hotkey == hotkey
+        )
+    return submissions
+
+
+def _state_has_current_submission_for_hotkey(
+    state: ValidatorState,
+    *,
+    hotkey: str,
+    registration_block: int,
+) -> bool:
+    return any(
+        _submission_is_current_for_registration(submission, registration_block)
+        for submission in _state_submissions_for_hotkey(state, hotkey)
+    )
+
+
+def _state_has_spent_marker_for_hotkey(state: ValidatorState, hotkey: str) -> bool:
+    return (
+        hotkey in state.locked_commitments
+        or hotkey in state.seen_hotkeys
+        or hotkey in state.retired_hotkeys
+        or hotkey in state.disqualified_hotkeys
+    )
+
+
 def _clear_stale_spent_state_for_reregistered_hotkey(
     state: ValidatorState,
     *,
@@ -7129,7 +7168,17 @@ def _clear_stale_spent_state_for_reregistered_hotkey(
         prior_block_int = int(prior_block) if prior_block is not None else None
     except (TypeError, ValueError):
         prior_block_int = None
-    if prior_block_int is None or prior_block_int >= int(registration_block):
+    if prior_block_int is None:
+        if (
+            not _state_has_spent_marker_for_hotkey(state, hotkey)
+            or _state_has_current_submission_for_hotkey(
+                state,
+                hotkey=hotkey,
+                registration_block=int(registration_block),
+            )
+        ):
+            return False
+    elif prior_block_int >= int(registration_block):
         return False
 
     changed = False
@@ -7774,9 +7823,52 @@ def _pop_next_valid_challenger(*, subtensor, github_client, config, state) -> Va
             log.info("Skipping stale queued commitment for hotkey %s", c.hotkey)
             continue
         if _submission_is_eligible(subtensor=subtensor, github_client=github_client, config=config, submission=c):
+            if _submission_duplicates_current_king_agent(config=config, state=state, submission=c):
+                king = state.current_king
+                log.warning(
+                    "Disqualifying queued challenger uid=%s hotkey=%s: agent hash matches current king uid=%s",
+                    c.uid,
+                    c.hotkey,
+                    king.uid if king is not None else None,
+                )
+                _mark_disqualified(state, c.hotkey)
+                continue
             return c
         _mark_disqualified(state, c.hotkey)
     return None
+
+
+def _submission_agent_sha256(config: RunConfig, submission: ValidatorSubmission) -> str | None:
+    parsed = _parse_private_submission_commitment(submission.commitment)
+    if parsed is not None:
+        return parsed[1]
+    if _is_private_submission(submission):
+        return submission.commit_sha.lower()
+    try:
+        agent_path, _multi_file = _materialize_agent_cache(config, submission)
+        return _agent_cache_source_sha256(agent_path).lower()
+    except Exception as exc:
+        log.warning(
+            "Could not resolve agent hash for %s@%s while checking duplicate challenger: %s",
+            submission.repo_full_name,
+            submission.commit_sha[:12],
+            exc,
+        )
+        return None
+
+
+def _submission_duplicates_current_king_agent(
+    *,
+    config: RunConfig,
+    state: ValidatorState,
+    submission: ValidatorSubmission,
+) -> bool:
+    king = state.current_king
+    if king is None or _is_burn_king(king):
+        return False
+    king_sha = _submission_agent_sha256(config, king)
+    challenger_sha = _submission_agent_sha256(config, submission)
+    return bool(king_sha and challenger_sha and king_sha == challenger_sha)
 
 
 def _submission_is_eligible(*, subtensor, github_client, config, submission) -> bool:
@@ -7790,7 +7882,14 @@ def _submission_is_eligible(*, subtensor, github_client, config, submission) -> 
     )
 
 
-def _submission_is_eligible_ignoring_mode(*, subtensor, github_client, config, submission) -> bool:
+def _submission_is_eligible_ignoring_mode(
+    *,
+    subtensor,
+    github_client,
+    config,
+    submission,
+    allow_transient_branch_check_failure: bool = False,
+) -> bool:
     if _is_private_submission(submission):
         return _private_submission_is_eligible(
             subtensor=subtensor,
@@ -7827,6 +7926,16 @@ def _submission_is_eligible_ignoring_mode(*, subtensor, github_client, config, s
         ):
             return False
     except _TransientCommitCheckError as exc:
+        if allow_transient_branch_check_failure:
+            log.warning(
+                "Transient GitHub check error for incumbent %s@%s branch reachability; "
+                "leaving eligibility unchanged this round: %s",
+                submission.repo_full_name,
+                submission.commit_sha[:12],
+                exc,
+            )
+            submission.uid = int(uid)
+            return True
         log.warning(
             "Transient GitHub check error for %s@%s branch reachability, treating as ineligible this round: %s",
             submission.repo_full_name,
@@ -7899,6 +8008,7 @@ def _maybe_disqualify_king(*, subtensor, github_client, config, state) -> None:
         github_client=github_client,
         config=config,
         submission=king,
+        allow_transient_branch_check_failure=True,
     ):
         return
     _mark_disqualified(state, king.hotkey)
@@ -8676,11 +8786,6 @@ def _merge_queued_submissions_from_disk_state(
             continue
         if state.current_king is not None and submission.hotkey == state.current_king.hotkey:
             continue
-        if not _should_retain_queued_submission(state, submission):
-            continue
-        locked = state.locked_commitments.get(submission.hotkey)
-        if locked is not None and locked != submission.commitment:
-            continue
         if config is not None and subtensor is not None:
             current_uid = _uid_for_hotkey_on_subnet(
                 subtensor=subtensor,
@@ -8702,6 +8807,11 @@ def _merge_queued_submissions_from_disk_state(
             )
             if not _submission_is_current_for_registration(submission, registration_block):
                 continue
+        if not _should_retain_queued_submission(state, submission):
+            continue
+        locked = state.locked_commitments.get(submission.hotkey)
+        if locked is not None and locked != submission.commitment:
+            continue
         _clear_stale_spent_state_for_reregistered_hotkey(
             state,
             hotkey=submission.hotkey,

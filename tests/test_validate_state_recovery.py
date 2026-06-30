@@ -17,7 +17,9 @@ from validate import (
     _build_recent_kings_for_r2_publish,
     _checkpoint_active_duel,
     _king_emission_shares,
+    _maybe_disqualify_king,
     _maybe_set_weights,
+    _pop_next_valid_challenger,
     _pop_resumable_active_challenger,
     _publish_dashboard,
     _purge_stale_recent_kings_after_restart,
@@ -27,6 +29,7 @@ from validate import (
     _replay_local_duel_files_to_r2,
     _run_parallel_duel,
     _start_active_duel,
+    _TransientCommitCheckError,
     _upsert_dashboard_history_summary,
     republish_recent_kings_dashboard_to_r2,
 )
@@ -523,6 +526,93 @@ class ValidatorStateRecoveryTest(unittest.TestCase):
         self.assertEqual(payload["current_king"]["runtime_repo_full_name"], "unarbos/ninja")
         self.assertEqual(payload["status"]["recent_kings"][0]["repo_full_name"], "private-submission")
         self.assertEqual(payload["status"]["recent_kings"][0]["runtime_repo_full_name"], "unarbos/ninja")
+
+    def test_pop_next_valid_challenger_disqualifies_duplicate_current_king_hash(self):
+        agent_sha = "a" * 64
+        king = ValidatorSubmission(
+            hotkey="5KingHotkey",
+            uid=42,
+            repo_full_name="ninja-subnet/ninja",
+            repo_url="https://github.com/ninja-subnet/ninja.git",
+            commit_sha="b" * 40,
+            commitment=f"private-submission:king-sub:{agent_sha}",
+            commitment_block=100,
+            source="private_published",
+        )
+        duplicate = ValidatorSubmission(
+            hotkey="5DuplicateHotkey",
+            uid=219,
+            repo_full_name="private-submission/dup-sub",
+            repo_url="private-submission://dup-sub",
+            commit_sha=agent_sha,
+            commitment=f"private-submission:dup-sub:{agent_sha}",
+            commitment_block=101,
+            source="private",
+        )
+        next_candidate_sha = "c" * 64
+        next_candidate = ValidatorSubmission(
+            hotkey="5NextHotkey",
+            uid=220,
+            repo_full_name="private-submission/next-sub",
+            repo_url="private-submission://next-sub",
+            commit_sha=next_candidate_sha,
+            commitment=f"private-submission:next-sub:{next_candidate_sha}",
+            commitment_block=102,
+            source="private",
+        )
+        state = ValidatorState(current_king=king, queue=[duplicate, next_candidate])
+
+        with mock.patch("validate._submission_is_eligible", return_value=True):
+            picked = _pop_next_valid_challenger(
+                subtensor=object(),
+                github_client=object(),
+                config=RunConfig(),
+                state=state,
+            )
+
+        self.assertEqual(picked, next_candidate)
+        self.assertIn(duplicate.hotkey, state.disqualified_hotkeys)
+        self.assertNotIn(next_candidate.hotkey, state.disqualified_hotkeys)
+
+    def test_maybe_disqualify_king_keeps_incumbent_on_transient_branch_check(self):
+        agent_sha = "a" * 64
+        king = ValidatorSubmission(
+            hotkey="5KingHotkey",
+            uid=42,
+            repo_full_name="ninja-subnet/ninja",
+            repo_url="https://github.com/ninja-subnet/ninja.git",
+            commit_sha="b" * 40,
+            commitment=f"private-submission:king-sub:{agent_sha}",
+            commitment_block=100,
+            source="private_published",
+        )
+        state = ValidatorState(current_king=king, recent_kings=[king])
+
+        class _Subnets:
+            def get_uid_for_hotkey_on_subnet(self, _hotkey, _netuid):
+                return 42
+
+        class _Subtensor:
+            subnets = _Subnets()
+
+        with (
+            mock.patch("validate._current_registration_block", return_value=None),
+            mock.patch("validate._is_public_commit", return_value=True),
+            mock.patch(
+                "validate._is_commit_on_branch",
+                side_effect=_TransientCommitCheckError("GET compare -> HTTP 403"),
+            ),
+        ):
+            _maybe_disqualify_king(
+                subtensor=_Subtensor(),
+                github_client=object(),
+                config=RunConfig(),
+                state=state,
+            )
+
+        self.assertEqual(state.current_king, king)
+        self.assertEqual(state.recent_kings, [king])
+        self.assertNotIn(king.hotkey, state.disqualified_hotkeys)
 
     def test_reconcile_advances_duel_id_and_removes_completed_queue_entry(self):
         completed = _submission(

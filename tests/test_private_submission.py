@@ -1442,7 +1442,7 @@ class PrivateSubmissionApiTest(unittest.TestCase):
         self.assertNotIn("agent_username", public_payload["submissions"][0])
         self.assertNotIn("coldkey", public_payload["submissions"][0])
 
-    def test_private_submission_judge_rejects_weak_component_scores(self):
+    def test_private_submission_judge_ignores_numeric_quality_scores(self):
         result = run_private_submission_checks(
             hotkey=HOTKEY,
             submitted_agent_py=GOOD_AGENT,
@@ -1450,21 +1450,20 @@ class PrivateSubmissionApiTest(unittest.TestCase):
             min_score=70,
             openrouter_judge=lambda payload: {
                 "verdict": "pass",
-                "overall_score": 72,
-                "real_edit_score": 69,
-                "safety_score": 95,
-                "scope_score": 90,
-                "contract_score": 95,
-                "summary": "Mostly reorders existing gates.",
-                "reasons": ["moves syntax fix before hail mary"],
+                "overall_score": 0,
+                "real_edit_score": 0,
+                "safety_score": 0,
+                "scope_score": 0,
+                "contract_score": 0,
+                "security_score": 100,
+                "summary": "No security issue found.",
+                "reasons": ["quality scores are outside the security-only judge scope"],
+                "risks": [],
             },
         )
 
-        self.assertFalse(result.accepted)
-        check = result.checks["openrouter_judge"]
-        self.assertEqual(check.status, "failed")
-        self.assertTrue(any("real_edit_score=69" in item for item in check.findings))
-
+        self.assertTrue(result.accepted)
+        self.assertEqual(result.checks["openrouter_judge"].status, "passed")
 
     def test_private_submission_judge_warn_does_not_auto_accept(self):
         result = run_private_submission_checks(
@@ -1475,126 +1474,24 @@ class PrivateSubmissionApiTest(unittest.TestCase):
             openrouter_judge=lambda payload: {
                 "verdict": "warn",
                 "overall_score": 85,
-                "real_edit_score": 82,
-                "safety_score": 95,
-                "scope_score": 90,
-                "contract_score": 95,
-                "summary": "Possibly useful but needs review.",
-                "reasons": ["uncertain signal"],
+                "security_score": 70,
+                "summary": "Possible sandbox escape probe needs review.",
+                "reasons": ["ambiguous access to container namespace metadata"],
+                "risks": [],
             },
         )
 
         self.assertFalse(result.accepted)
         self.assertEqual(result.checks["openrouter_judge"].status, "warn")
 
-    def test_private_submission_judge_rejects_borderline_cosmetic_goodhart_risk(self):
-        result = run_private_submission_checks(
-            hotkey=HOTKEY,
-            submitted_agent_py=GOOD_AGENT,
-            base_agent_py=BASE_AGENT,
-            min_score=70,
-            openrouter_judge=lambda payload: {
-                "verdict": "pass",
-                "overall_score": 70,
-                "real_edit_score": 72,
-                "safety_score": 95,
-                "scope_score": 90,
-                "contract_score": 95,
-                "summary": "Mostly comment cleanup with a tiny scoring tweak.",
-                "reasons": ["changes comments and normalizes newlines"],
-                "risks": ["cosmetic-copy: significant comment churn and bulk unchanged file"],
-            },
-        )
-
-        self.assertFalse(result.accepted)
-        check = result.checks["openrouter_judge"]
-        self.assertEqual(check.status, "failed")
-        self.assertTrue(any("cosmetic-copy/goodhart" in item for item in check.findings))
-
-    def test_private_submission_judge_allows_positive_goodhart_mention(self):
-        result = run_private_submission_checks(
-            hotkey=HOTKEY,
-            submitted_agent_py=GOOD_AGENT,
-            base_agent_py=BASE_AGENT,
-            min_score=70,
-            openrouter_judge=lambda payload: {
-                "verdict": "pass",
-                "overall_score": 70,
-                "real_edit_score": 70,
-                "safety_score": 95,
-                "scope_score": 90,
-                "contract_score": 95,
-                "summary": "Functional fix; no Goodhart risk in the scoring path.",
-                "reasons": ["avoids goodhart incentives by preserving real behavior"],
-                "risks": [],
-            },
-        )
-
-        self.assertTrue(result.accepted)
-        self.assertEqual(result.checks["openrouter_judge"].status, "passed")
-
-    def test_private_submission_judge_allows_positive_non_contribution_mentions(self):
-        positive_mentions = (
-            "Functional change; no cosmetic-copy risk remains.",
-            "Functional change; no comment churn risk remains.",
-            "Functional change; newline normalization is not present.",
-            "Functional change; this is not merely normalizes newlines.",
-            "Functional change; parameter-only is not present.",
-        )
-        for summary in positive_mentions:
-            with self.subTest(summary=summary):
-                result = run_private_submission_checks(
-                    hotkey=HOTKEY,
-                    submitted_agent_py=GOOD_AGENT,
-                    base_agent_py=BASE_AGENT,
-                    min_score=70,
-                    openrouter_judge=lambda payload: {
-                        "verdict": "pass",
-                        "overall_score": 70,
-                        "real_edit_score": 70,
-                        "safety_score": 95,
-                        "scope_score": 90,
-                        "contract_score": 95,
-                        "summary": summary,
-                        "reasons": [],
-                        "risks": [],
-                    },
-                )
-
-                self.assertTrue(result.accepted)
-                self.assertEqual(result.checks["openrouter_judge"].status, "passed")
-
-    def test_private_submission_judge_ignores_unstructured_risk_prose(self):
-        result = run_private_submission_checks(
-            hotkey=HOTKEY,
-            submitted_agent_py=GOOD_AGENT,
-            base_agent_py=BASE_AGENT,
-            min_score=70,
-            openrouter_judge=lambda payload: {
-                "verdict": "pass",
-                "overall_score": 70,
-                "real_edit_score": 70,
-                "safety_score": 95,
-                "scope_score": 90,
-                "contract_score": 95,
-                "summary": "Avoids Goodhart incentives but the patch is mostly comment churn.",
-                "reasons": [],
-                "risks": [],
-            },
-        )
-
-        self.assertTrue(result.accepted)
-        self.assertEqual(result.checks["openrouter_judge"].status, "passed")
-
-    def test_private_submission_judge_rejects_structured_non_contribution_risks(self):
+    def test_private_submission_judge_allows_non_security_risk_categories(self):
         risk_payloads = (
-            ["comment-churn"],
+            ["cosmetic-copy"],
             ["comment-churn: comments make up most of the patch"],
-            ["newline-normalization"],
             ["newline-normalization - mostly line ending churn"],
-            ["parameter-only"],
             ["parameter-only: only changes a threshold"],
             [{"category": "goodhart", "evidence": "score-targeted behavior"}],
+            ["obfuscation: hard to read but no security payload identified"],
         )
         for risks in risk_payloads:
             with self.subTest(risks=risks):
@@ -1605,30 +1502,87 @@ class PrivateSubmissionApiTest(unittest.TestCase):
                     min_score=70,
                     openrouter_judge=lambda payload: {
                         "verdict": "pass",
-                        "overall_score": 74,
-                        "real_edit_score": 74,
-                        "safety_score": 95,
-                        "scope_score": 90,
-                        "contract_score": 95,
-                        "summary": "Functional-looking but judge reported a concrete risk.",
+                        "overall_score": 10,
+                        "security_score": 100,
+                        "summary": "Non-security concern only.",
+                        "reasons": [],
+                        "risks": risks,
+                    },
+                )
+
+                self.assertTrue(result.accepted)
+                self.assertEqual(result.checks["openrouter_judge"].status, "passed")
+
+    def test_private_submission_judge_rejects_structured_security_risks(self):
+        risk_payloads = (
+            ["exfiltration: reads host secrets and sends them out"],
+            ["docker-sandbox-escape: opens /var/run/docker.sock"],
+            ["sandbox-escape - attempts namespace breakout"],
+            ["secret-theft"],
+            ["network-exfiltration"],
+            ["host-filesystem-access"],
+            ["privilege-escalation"],
+            ["persistence"],
+            ["cryptomining"],
+            ["destructive-tampering"],
+            ["prompt-exfiltration"],
+            [{"category": "container-escape", "evidence": "uses cgroup release_agent"}],
+        )
+        for risks in risk_payloads:
+            with self.subTest(risks=risks):
+                result = run_private_submission_checks(
+                    hotkey=HOTKEY,
+                    submitted_agent_py=GOOD_AGENT,
+                    base_agent_py=BASE_AGENT,
+                    min_score=70,
+                    openrouter_judge=lambda payload: {
+                        "verdict": "pass",
+                        "overall_score": 90,
+                        "security_score": 5,
+                        "summary": "Judge reported a concrete security risk.",
                         "reasons": [],
                         "risks": risks,
                     },
                 )
 
                 self.assertFalse(result.accepted)
-                self.assertEqual(result.checks["openrouter_judge"].status, "failed")
+                check = result.checks["openrouter_judge"]
+                self.assertEqual(check.status, "failed")
+                self.assertTrue(any("security risk category" in item for item in check.findings))
 
-    def test_private_submission_judge_prompt_excludes_non_contributions(self):
+    def test_private_submission_judge_ignores_unstructured_non_security_prose(self):
+        result = run_private_submission_checks(
+            hotkey=HOTKEY,
+            submitted_agent_py=GOOD_AGENT,
+            base_agent_py=BASE_AGENT,
+            min_score=70,
+            openrouter_judge=lambda payload: {
+                "verdict": "pass",
+                "overall_score": 10,
+                "security_score": 100,
+                "summary": "Avoids Goodhart incentives but the patch is mostly comment churn.",
+                "reasons": [],
+                "risks": [],
+            },
+        )
+
+        self.assertTrue(result.accepted)
+        self.assertEqual(result.checks["openrouter_judge"].status, "passed")
+
+    def test_private_submission_judge_prompt_is_security_only(self):
         from cli import _PRIVATE_SUBMISSION_JUDGE_SYSTEM_PROMPT
 
         prompt = _PRIVATE_SUBMISSION_JUDGE_SYSTEM_PROMPT
 
-        self.assertIn("actual contribution to the real function of the agent", prompt)
-        self.assertIn("newline normalization", prompt)
-        self.assertIn("parameter/constant/cap changes", prompt)
-        self.assertIn("count as zero contribution", prompt)
-
+        self.assertIn("Your only job", prompt)
+        self.assertIn("code-security", prompt)
+        self.assertIn("exfiltration", prompt)
+        self.assertIn("Docker, container, sandbox, or host escape attempts", prompt)
+        self.assertIn("security_score", prompt)
+        self.assertNotIn("real_edit_score", prompt)
+        self.assertNotIn("actual contribution to the real function of the agent", prompt)
+        self.assertNotIn("Reorder-only", prompt)
+        self.assertNotIn("hail-mary", prompt)
 
     def test_private_submission_judge_uses_private_claude_prompt(self):
         from cli import _build_private_submission_openrouter_judge
@@ -1641,13 +1595,10 @@ class PrivateSubmissionApiTest(unittest.TestCase):
                 {
                     "verdict": "warn",
                     "overall_score": 55,
-                    "real_edit_score": 50,
-                    "safety_score": 90,
-                    "scope_score": 80,
-                    "contract_score": 90,
-                    "summary": "Looks suspicious.",
+                    "security_score": 55,
+                    "summary": "Possible security issue.",
                     "reasons": ["reason"],
-                    "risks": ["risk"],
+                    "risks": ["sandbox-escape: ambiguous namespace access"],
                     "required_changes": ["change"],
                 }
             )
@@ -1672,19 +1623,18 @@ class PrivateSubmissionApiTest(unittest.TestCase):
         self.assertIsNone(call["reasoning"])
         self.assertIn("CI gatekeeping judge", call["system_prompt"])
         self.assertIn("private Subnet 66 ninja submission API", call["system_prompt"])
-        self.assertIn("Reorder-only / gate-order changes", call["system_prompt"])
-        self.assertIn("hail-mary", call["system_prompt"])
-        self.assertIn("real_edit_score", call["system_prompt"])
-        self.assertIn("Deletion is not itself a", call["system_prompt"])
-        self.assertIn("small amount of positive credit", call["system_prompt"])
-        self.assertIn("credit modest", call["system_prompt"])
+        self.assertIn("Your only job", call["system_prompt"])
+        self.assertIn("exfiltration", call["system_prompt"])
+        self.assertIn("Docker, container, sandbox, or host escape attempts", call["system_prompt"])
+        self.assertIn("security_score", call["system_prompt"])
+        self.assertNotIn("real_edit_score", call["system_prompt"])
+        self.assertNotIn("Reorder-only", call["system_prompt"])
+        self.assertNotIn("hail-mary", call["system_prompt"])
         self.assertIn("<submission_data>", call["prompt"])
         self.assertIn('"patch": "diff"', call["prompt"])
         self.assertIn("base_files", call["prompt"])
         self.assertIn("base_agent_py", call["prompt"])
         self.assertIn("submitted_agent_py", call["prompt"])
-        self.assertIn("current public base harness files", call["system_prompt"])
-        self.assertIn("full harness", call["system_prompt"])
         self.assertNotIn("<pr_data>", call["prompt"])
 
     def test_solve_spend_payload_sums_recent_solve_costs(self):
