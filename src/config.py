@@ -250,7 +250,7 @@ class RunConfig:
     validate_subtensor_endpoint: str | None = None
     validate_duel_rounds: int = 50
     validate_duel_scoring_method: str = "round_wins"
-    validate_mean_score_margin: float = 0.03
+    validate_mean_score_margin: float = 0.05
     validate_win_margin: int = 0
     validate_max_concurrency: int = 1
     validate_round_concurrency: int = 25

@@ -42,7 +42,7 @@ exec /home/const/subnet66/.venv/bin/python -m cli validate \
   --rollout-root /home/const/subnet66/tau/workspace/rollouts \
   --duel-rounds 50 \
   --scoring-method mean \
-  --mean-score-margin 0.03 \
+  --mean-score-margin 0.05 \
   --min-commitment-block 7951985 \
   --hotkey-spent-since-block 8104340 \
   --watch-private-submissions \
