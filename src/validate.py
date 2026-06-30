@@ -5870,10 +5870,7 @@ def _publish_dashboard(
     chain_data: dict[str, Any] | None = None,
 ) -> None:
     king = state.current_king
-    current_king_defenses = _current_king_defense_count(
-        king_hotkey=king.hotkey if king else None,
-        history=history,
-    )
+    current_king_defenses = state.king_duels_defended if king else 0
     king_dict = (
         _dashboard_submission_dict(
             king,
