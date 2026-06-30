@@ -325,7 +325,19 @@ def build_parser() -> argparse.ArgumentParser:
         "--subtensor-endpoint",
         help="Optional websocket endpoint that overrides --network for chain access.",
     )
-    validate.add_argument("-N", "--duel-rounds", type=int, default=50, help="Decisive rounds per duel.")
+    validate.add_argument("-N", "--duel-rounds", type=int, default=50, help="Rounds per duel.")
+    validate.add_argument(
+        "--scoring-method",
+        choices=("round-wins", "mean"),
+        default=RunConfig().validate_duel_scoring_method.replace("_", "-"),
+        help="Promotion scoring rule: decisive round wins or paired raw mean judge score.",
+    )
+    validate.add_argument(
+        "--mean-score-margin",
+        type=float,
+        default=RunConfig().validate_mean_score_margin,
+        help="Minimum challenger mean-score advantage required when --scoring-method=mean.",
+    )
     validate.add_argument("-K", "--win-margin", type=int, default=0, help="Extra decisive round wins over the king required to dethrone.")
     validate.add_argument("--max-concurrency", type=int, default=1, help="Max parallel duels (1 = serialized).")
     validate.add_argument("--round-concurrency", type=int, default=25, help="Max parallel rounds within a single duel.")
@@ -338,7 +350,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="Keep primary and retest pools as static fixed task sets for the current king; stale tasks are flushed instead of being refreshed in place.",
     )
     validate.add_argument("--weight-interval-blocks", type=int, default=360, help="Blocks between weight sets.")
-    validate.add_argument("--king-window-size", type=int, default=5, help="Number of king emission slots; default distribution is 40% current king plus 15% for each prior king slot.")
+    validate.add_argument("--king-window-size", type=int, default=5, help="Number of king emission slots; default distribution is 40%% current king plus 15%% for each prior king slot.")
     validate.add_argument("--poll-interval-seconds", type=int, default=600, help="Seconds between chain submission refreshes.")
     validate.add_argument(
         "--min-free-disk-bytes",
@@ -1314,10 +1326,26 @@ def _build_private_submission_openrouter_judge(args: argparse.Namespace):
             temperature=0,
             max_tokens=16_000,
             reasoning=_PRIVATE_SUBMISSION_JUDGE_REASONING if judge_model.startswith("anthropic/") else None,
+            provider=_private_submission_judge_provider_preferences(),
         )
         return _parse_json_object(response)
 
     return judge
+
+
+def _private_submission_judge_provider_preferences() -> dict | None:
+    only = [
+        part.strip()
+        for part in (os.environ.get("PRIVATE_SUBMISSION_JUDGE_PROVIDER_ONLY") or "").split(",")
+        if part.strip()
+    ]
+    allow_fallbacks_raw = os.environ.get("PRIVATE_SUBMISSION_JUDGE_PROVIDER_ALLOW_FALLBACKS")
+    provider = {}
+    if only:
+        provider["only"] = only
+    if allow_fallbacks_raw is not None:
+        provider["allow_fallbacks"] = allow_fallbacks_raw.strip().lower() in {"1", "true", "yes", "on"}
+    return provider or None
 
 
 def _truncate_text_map(value: object, *, max_total_chars: int) -> dict[str, str]:
@@ -1421,6 +1449,8 @@ def _build_validate_config(args: argparse.Namespace) -> RunConfig:
         validate_network=args.network,
         validate_subtensor_endpoint=args.subtensor_endpoint,
         validate_duel_rounds=args.duel_rounds,
+        validate_duel_scoring_method=args.scoring_method.replace("-", "_"),
+        validate_mean_score_margin=args.mean_score_margin,
         validate_win_margin=args.win_margin,
         validate_max_concurrency=args.max_concurrency,
         validate_round_concurrency=args.round_concurrency,

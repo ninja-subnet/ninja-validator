@@ -332,10 +332,10 @@ The validator keeps two independent 50-task pools: a primary pool for the
 first challenger-vs-king duel, and a retest pool used only when the challenger
 wins the primary duel. Promotion requires the challenger to also win the retest,
 which checks the improvement on a separate task set before changing the king.
-Parallel duels run the full gathered task set instead of stopping early once an
-outcome is mathematically decided. By default both pools are static fixed-size
-sets: once each pool reaches 50 tasks, the validator reuses that same ordered
-set until the king changes or an operator explicitly enables pool refresh.
+Mean-scored duels run the full gathered task set. By default both pools are
+static fixed-size sets: once each pool reaches 50 tasks, the validator reuses
+that same ordered set until the king changes or an operator explicitly enables
+pool refresh.
 
 The production validator continuously drains queued candidates in queue order
 and refreshes accepted API submissions every 10 minutes, adding newly eligible
@@ -361,13 +361,15 @@ to non-zero values.
 
 `start_validator.sh` routes both judges through OpenRouter with
 `TAU_DIFF_JUDGE_MODEL=z-ai/glm-5.2` and
-`PRIVATE_SUBMISSION_JUDGE_MODEL=z-ai/glm-5.2`. Solver, generator, and eval
-traffic uses the self-hosted `Qwen/Qwen3-32B` endpoint. The script runs
-`cli validate` with notable flags such as:
+`PRIVATE_SUBMISSION_JUDGE_MODEL=z-ai/glm-5.2`. Both GLM judges are pinned to
+OpenRouter's Z.AI endpoint with `TAU_DIFF_JUDGE_PROVIDER_ONLY=z-ai/fp8` and
+`PRIVATE_SUBMISSION_JUDGE_PROVIDER_ONLY=z-ai/fp8`, with fallbacks disabled.
+Solver, generator, and eval traffic uses the self-hosted `Qwen/Qwen3.6-27B`
+endpoint. The script runs `cli validate` with notable flags such as:
 
 ```bash
 python -m cli validate \
-  --solver-model Qwen/Qwen3-32B \
+  --solver-model Qwen/Qwen3.6-27B \
   --round-concurrency 25 \
   --docker-solver-start-concurrency 25 \
   --candidate-timeout-streak-limit 10 \
@@ -375,7 +377,8 @@ python -m cli validate \
   --task-pool-target 50 \
   --task-pool-static \
   --duel-rounds 50 \
-  --win-margin 6 \
+  --scoring-method mean \
+  --mean-score-margin 0.03 \
   --hotkey-spent-since-block 8104340 \
   --watch-private-submissions \
   --private-submission-only \
@@ -400,9 +403,12 @@ the task/reference context. Candidate patches are role-blinded and treated as
 untrusted input. Up to four attempts run within a 300-second total timeout.
 Change the model with `TAU_DIFF_JUDGE_MODEL`; Anthropic models use adaptive
 reasoning and prompt-cache breakpoints, but production currently runs GLM 5.2
-with no configured fallback models.
+through `z-ai/fp8` with no configured fallback models.
 
-Cursor is telemetry only for round scoring. The challenger does not need to beat Cursor directly; it only needs more decisive round wins than the current king plus the configured margin. `start_validator.sh` currently uses `--win-margin 6`.
+Cursor is telemetry only for round scoring. In production, `start_validator.sh`
+uses `--scoring-method mean --mean-score-margin 0.03`: the challenger must beat
+the king's paired raw mean judge score by at least `0.03` across the duel. The
+older `round-wins` scoring mode is still available and uses `--win-margin`.
 
 The validator still compares `king` to `challenger` separately for copy detection, but that pairwise similarity does not affect the round score.
 
@@ -412,7 +418,7 @@ Docker file agents receive a validator-managed OpenAI-compatible endpoint throug
 
 The proxy forwards to OpenRouter and enforces:
 
-- the validator-selected model, currently self-hosted `Qwen/Qwen3-32B` for solver inference unless overridden by validator config
+- the validator-selected model, currently self-hosted `Qwen/Qwen3.6-27B` for solver inference unless overridden by validator config
 - `temperature=0.0`
 - `top_p=0.01` (override via `TAU_TOP_P`)
 - removal of miner-controlled sampling fields such as `top_k`, `seed`, penalties, `logit_bias`, and `logprobs`

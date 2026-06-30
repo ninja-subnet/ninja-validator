@@ -2066,6 +2066,91 @@ class TaskPoolTest(unittest.TestCase):
         self.assertEqual(len(result.rounds), 9)
         kill_containers.assert_not_called()
 
+    def test_parallel_duel_mean_scoring_runs_all_rounds_and_uses_score_delta(self):
+        with tempfile.TemporaryDirectory() as td:
+            pool = TaskPool(Path(td) / "pool")
+            for idx in range(8):
+                task_root = Path(td) / f"task-{idx:02d}"
+                self._write_minimal_task_metadata(task_root)
+                baseline_dir = task_root / "solutions" / "baseline"
+                baseline_dir.mkdir(parents=True, exist_ok=True)
+                (baseline_dir / "solve.json").write_text("{}\n")
+                (baseline_dir / "solution.diff").write_text("diff\n")
+                pool.add(
+                    PoolTask(
+                        task_name=f"task-{idx:02d}",
+                        task_root=str(task_root),
+                        creation_block=1,
+                        cursor_elapsed=float(idx + 1),
+                        king_lines=1,
+                        king_similarity=0.1,
+                        baseline_lines=1,
+                    )
+                )
+            config = RunConfig(
+                workspace_root=Path(td),
+                validate_duel_rounds=8,
+                validate_duel_scoring_method="mean",
+                validate_mean_score_margin=0.02,
+                validate_round_concurrency=1,
+                validate_win_margin=3,
+            )
+            king = validate.ValidatorSubmission(
+                hotkey="king-hotkey",
+                uid=1,
+                repo_full_name="king/ninja",
+                repo_url="https://github.com/king/ninja",
+                commit_sha="a" * 40,
+                commitment="unarbos/ninja@" + "a" * 40,
+                commitment_block=1,
+                source="chain",
+            )
+            challenger = validate.ValidatorSubmission(
+                hotkey="challenger-hotkey",
+                uid=2,
+                repo_full_name="challenger/ninja",
+                repo_url="https://github.com/challenger/ninja",
+                commit_sha="b" * 40,
+                commitment="unarbos/ninja@" + "b" * 40,
+                commitment_block=1,
+                source="chain",
+            )
+
+            def scored_round(*, task, king, challenger, config, duel_id, pool=None, **_kwargs):
+                task_idx = int(task.task_name.rsplit("-", 1)[1])
+                winner = "king" if task_idx < 3 else "challenger"
+                challenger_score = 0.45 if task_idx < 3 else 0.57
+                return validate.ValidationRoundResult(
+                    task_name=task.task_name,
+                    winner=winner,
+                    king_lines=1,
+                    challenger_lines=1,
+                    king_similarity_ratio=1.0,
+                    challenger_similarity_ratio=0.0,
+                    king_challenger_similarity=0.0,
+                    task_root=task.task_root,
+                    king_compare_root="",
+                    challenger_compare_root="",
+                    king_score=0.50,
+                    challenger_score=challenger_score,
+                )
+
+            with patch("validate._solve_and_compare_round", side_effect=scored_round) as solve_round:
+                result = validate._run_parallel_duel(
+                    config=config,
+                    state=validate.ValidatorState(current_king=king),
+                    king=king,
+                    challenger=challenger,
+                    duel_id=99,
+                    pool=pool,
+                )
+
+        self.assertTrue(result.king_replaced)
+        self.assertEqual(result.scoring_method, "mean")
+        self.assertEqual(len(result.rounds), 8)
+        self.assertEqual(solve_round.call_count, 8)
+        self.assertAlmostEqual(result.score_mean_delta, 0.025)
+
     def test_parallel_duel_does_not_stop_unstarted_rounds_for_mean_copy_dq(self):
         with tempfile.TemporaryDirectory() as td:
             pool = TaskPool(Path(td) / "pool")

@@ -43,7 +43,7 @@ class TaskGenerationTest(unittest.TestCase):
                 task = generate_task_description(
                     candidate=_candidate(),
                     prompt_dir=Path(tmp),
-                    model="Qwen/Qwen3-32B",
+                    model="Qwen/Qwen3.6-27B",
                     timeout=10,
                     openrouter_api_key="key",
                 )

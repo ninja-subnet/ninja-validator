@@ -3,6 +3,7 @@ src/workspace/
 benchmark_results/
 data/
 misc/
+scripts/
 start_fast_king_eval.sh
 start_swebench_king_benchmark.sh
 start_terminal_bench_king_benchmark.sh

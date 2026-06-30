@@ -86,6 +86,8 @@ _BURN_KING_COMMITMENT_PREFIX = "burn:uid-0"
 _REFERENCE_SOLUTION_NAME = "reference"
 _LEGACY_BASELINE_SOLUTION_NAME = "baseline"
 _DIFF_JUDGE_MODEL = os.environ.get("TAU_DIFF_JUDGE_MODEL", "google/gemini-3.1-flash-lite")
+_DIFF_JUDGE_PROVIDER_ONLY = os.environ.get("TAU_DIFF_JUDGE_PROVIDER_ONLY")
+_DIFF_JUDGE_PROVIDER_ALLOW_FALLBACKS = os.environ.get("TAU_DIFF_JUDGE_PROVIDER_ALLOW_FALLBACKS")
 _DIFF_JUDGE_FALLBACK_MODELS = ()
 _DIFF_JUDGE_WEIGHT = 1.0
 # Minimum combined round-score gap required to award a side a decisive win.
@@ -219,6 +221,19 @@ class RetryableDuelError(RuntimeError):
     """Duel failed for infrastructure reasons and should not be recorded."""
 
 
+_DUEL_SCORING_ROUND_WINS = "round_wins"
+_DUEL_SCORING_MEAN = "mean"
+
+
+def _normalize_duel_scoring_method(method: str | None) -> str:
+    normalized = str(method or _DUEL_SCORING_ROUND_WINS).strip().lower().replace("-", "_")
+    if normalized in {"race", "round_win", "round_wins"}:
+        return _DUEL_SCORING_ROUND_WINS
+    if normalized in {"mean", "score_mean", "mean_score"}:
+        return _DUEL_SCORING_MEAN
+    raise ValueError(f"unknown duel scoring method: {method!r}")
+
+
 def _challenger_wins(wins: int, losses: int, margin: int) -> bool:
     """Return True when the challenger has beaten the king.
 
@@ -248,6 +263,24 @@ def _duel_math_stop_reason(wins: int, losses: int, remaining_rounds: int, margin
 
 def _duel_speed_stop_reason(wins: int, losses: int, remaining_rounds: int, margin: int) -> str | None:
     return _duel_math_stop_reason(wins, losses, remaining_rounds, margin)
+
+
+def _duel_score_mean_delta(rounds: Sequence[ValidationRoundResult]) -> tuple[float, float, float, int]:
+    scored = [r for r in rounds if r.scored]
+    if not scored:
+        return 0.0, 0.0, 0.0, 0
+    king_mean = sum(float(r.king_score) for r in scored) / len(scored)
+    challenger_mean = sum(float(r.challenger_score) for r in scored) / len(scored)
+    return king_mean, challenger_mean, challenger_mean - king_mean, len(scored)
+
+
+def _challenger_wins_by_mean_score(
+    rounds: Sequence[ValidationRoundResult],
+    *,
+    margin: float,
+) -> bool:
+    _king_mean, _challenger_mean, delta, scored = _duel_score_mean_delta(rounds)
+    return scored > 0 and delta >= margin
 
 
 def _copy_detection_reason(
@@ -588,6 +621,12 @@ class DuelResult:
     ties: int
     king_after: ValidatorSubmission
     king_replaced: bool
+    scoring_method: str = _DUEL_SCORING_ROUND_WINS
+    mean_score_margin: float = 0.0
+    king_score_mean: float = 0.0
+    challenger_score_mean: float = 0.0
+    score_mean_delta: float = 0.0
+    score_mean_rounds: int = 0
     disqualification_reason: str | None = None
     task_set_phase: str = "primary"
     confirmation_of_duel_id: int | None = None
@@ -605,6 +644,12 @@ class DuelResult:
             "wins": self.wins, "losses": self.losses, "ties": self.ties,
             "king_after": self.king_after.to_dict(),
             "king_replaced": self.king_replaced,
+            "scoring_method": self.scoring_method,
+            "mean_score_margin": self.mean_score_margin,
+            "king_score_mean": self.king_score_mean,
+            "challenger_score_mean": self.challenger_score_mean,
+            "score_mean_delta": self.score_mean_delta,
+            "score_mean_rounds": self.score_mean_rounds,
             "disqualification_reason": self.disqualification_reason,
             "task_set_phase": self.task_set_phase,
             "confirmation_of_duel_id": self.confirmation_of_duel_id,
@@ -1100,6 +1145,8 @@ def _active_duel_dashboard_info_from_state(
     wins = sum(1 for r in lease.rounds if r.scored and r.winner == "challenger")
     losses = sum(1 for r in lease.rounds if r.scored and r.winner == "king")
     ties = sum(1 for r in lease.rounds if r.scored and r.winner == "tie")
+    king_score_mean, challenger_score_mean, score_mean_delta, scored_mean_rounds = _duel_score_mean_delta(lease.rounds)
+    scoring_method = _normalize_duel_scoring_method(config.validate_duel_scoring_method)
     phase = lease.status or "running"
     return {
         "duel_id": lease.duel_id,
@@ -1114,6 +1161,12 @@ def _active_duel_dashboard_info_from_state(
         "challenger_repo_url": None,
         "threshold": losses + config.validate_win_margin + 1,
         "win_margin": config.validate_win_margin,
+        "scoring_method": scoring_method,
+        "mean_score_margin": config.validate_mean_score_margin,
+        "king_score_mean": king_score_mean,
+        "challenger_score_mean": challenger_score_mean,
+        "score_mean_delta": score_mean_delta,
+        "score_mean_rounds": scored_mean_rounds,
         "duel_rounds": config.validate_duel_rounds,
         "task_set_phase": lease.task_set_phase,
         "confirmation_of_duel_id": lease.confirmation_of_duel_id,
@@ -1564,6 +1617,27 @@ def _provider_error_exit_reason(exit_reason: str | None) -> bool:
     return _provider_account_error_exit_reason(exit_reason) or _provider_endpoint_error_exit_reason(exit_reason)
 
 
+def _env_bool_value(raw: str | None) -> bool | None:
+    if raw is None:
+        return None
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _split_provider_slugs(raw: str | None) -> list[str]:
+    return [part.strip() for part in (raw or "").split(",") if part.strip()]
+
+
+def _diff_judge_provider_preferences() -> dict[str, Any] | None:
+    provider: dict[str, Any] = {}
+    only = _split_provider_slugs(_DIFF_JUDGE_PROVIDER_ONLY)
+    if only:
+        provider["only"] = only
+    allow_fallbacks = _env_bool_value(_DIFF_JUDGE_PROVIDER_ALLOW_FALLBACKS)
+    if allow_fallbacks is not None:
+        provider["allow_fallbacks"] = allow_fallbacks
+    return provider or None
+
+
 def _provider_error_kind(exit_reason: str | None) -> str:
     if _provider_account_error_exit_reason(exit_reason):
         return "provider_account_error"
@@ -1840,6 +1914,7 @@ def _judge_round_diffs_uncapped(
     deadline = time.monotonic() + _DIFF_JUDGE_TOTAL_TIMEOUT_SECONDS
     semaphore_starved = False
     timed_out = False
+    provider = _diff_judge_provider_preferences()
 
     def _round_aborted() -> bool:
         return cancel_event.is_set() or (round_cancel is not None and round_cancel.is_set())
@@ -1942,6 +2017,7 @@ def _judge_round_diffs_uncapped(
                         seed=judge_seed,
                         max_tokens=_DIFF_JUDGE_MAX_TOKENS,
                         reasoning=reasoning,
+                        provider=provider,
                         rate_limit_retries=resolve_rate_limit_retries(
                             config.solver_rate_limit_retries,
                         ),
@@ -1963,6 +2039,7 @@ def _judge_round_diffs_uncapped(
                     acquire_wait_ms=round(acquire_wait_ms, 1),
                     call_elapsed_ms=round(call_elapsed_ms, 1),
                     timeout_s=request_timeout,
+                    provider=provider,
                     outcome="success",
                     diff_judge_threads=_diff_judge_daemon_thread_count(),
                     semaphore_value=_diff_judge_semaphore_value(semaphore),
@@ -2005,6 +2082,7 @@ def _judge_round_diffs_uncapped(
                     acquire_wait_ms=round(acquire_wait_ms, 1),
                     call_elapsed_ms=round(call_elapsed_ms, 1),
                     timeout_s=request_timeout or None,
+                    provider=provider,
                     outcome="error",
                     error=attempt_error,
                     diff_judge_threads=_diff_judge_daemon_thread_count(),
@@ -3828,6 +3906,9 @@ def _run_parallel_duel(
     n_rounds = config.validate_duel_rounds
     concurrency = config.validate_round_concurrency
     margin = config.validate_win_margin
+    scoring_method = _normalize_duel_scoring_method(config.validate_duel_scoring_method)
+    mean_score_margin = float(config.validate_mean_score_margin)
+    use_round_win_scoring = scoring_method == _DUEL_SCORING_ROUND_WINS
     started_at = _timestamp()
     resume_lease = (
         state.active_duel
@@ -3843,13 +3924,21 @@ def _run_parallel_duel(
     if resume_lease is not None:
         started_at = resume_lease.started_at
 
-    log.info(
-        "Parallel duel %d: king uid=%s vs challenger uid=%s (%s), "
-        "%d rounds at concurrency %d, challenger must beat king by >%d "
-        "decisive round(s), ties ignored",
-        duel_id, king.uid, challenger.uid, challenger.repo_full_name,
-        n_rounds, concurrency, margin,
-    )
+    if use_round_win_scoring:
+        log.info(
+            "Parallel duel %d: king uid=%s vs challenger uid=%s (%s), "
+            "%d rounds at concurrency %d, challenger must beat king by >%d "
+            "decisive round(s), ties ignored",
+            duel_id, king.uid, challenger.uid, challenger.repo_full_name,
+            n_rounds, concurrency, margin,
+        )
+    else:
+        log.info(
+            "Parallel duel %d: king uid=%s vs challenger uid=%s (%s), "
+            "%d rounds at concurrency %d, challenger must beat king mean score by >=%.4f",
+            duel_id, king.uid, challenger.uid, challenger.repo_full_name,
+            n_rounds, concurrency, mean_score_margin,
+        )
 
     # Phase 1: gather tasks from pool, or reuse a restored selected task list.
     log.info("Duel %d phase 1: gathering %d tasks from pool (pool size=%d)",
@@ -3871,6 +3960,8 @@ def _run_parallel_duel(
                 scored=0,
                 threshold=margin + 1,
                 rounds=resume_rounds,
+                scoring_method=scoring_method,
+                mean_score_margin=mean_score_margin,
                 phase="gathering_tasks",
                 gathered_tasks=gathered,
                 needed_tasks=needed,
@@ -3931,6 +4022,8 @@ def _run_parallel_duel(
                 scored=0,
                 threshold=margin + 1,
                 rounds=resume_rounds,
+                scoring_method=scoring_method,
+                mean_score_margin=mean_score_margin,
                 task_names=[task.task_name for task in tasks],
                 phase="tasks_selected",
                 gathered_tasks=len(tasks),
@@ -3991,6 +4084,7 @@ def _run_parallel_duel(
         ties = sum(1 for r in rounds if r.scored and r.winner == "tie")
         scored = wins + losses
         dyn_threshold = losses + margin + 1
+        king_score_mean, challenger_score_mean, score_mean_delta, scored_mean_rounds = _duel_score_mean_delta(rounds)
         with published_artifact_lock:
             artifact_task_names = list(published_artifact_task_names)
         try:
@@ -3998,6 +4092,12 @@ def _run_parallel_duel(
                 duel_id=duel_id, wins=wins, losses=losses, ties=ties,
                 scored=scored, threshold=dyn_threshold, rounds=rounds,
                 artifact_task_names=artifact_task_names,
+                scoring_method=scoring_method,
+                mean_score_margin=mean_score_margin,
+                king_score_mean=king_score_mean,
+                challenger_score_mean=challenger_score_mean,
+                score_mean_delta=score_mean_delta,
+                score_mean_rounds=scored_mean_rounds,
                 phase="running_rounds",
                 gathered_tasks=len(tasks),
                 needed_tasks=n_rounds,
@@ -4185,7 +4285,7 @@ def _run_parallel_duel(
                 len(task_queue),
             )
             _emit_progress()
-        if not _stop_for_dq_if_detected() and not _stop_for_math_if_decided():
+        if not _stop_for_dq_if_detected() and (not use_round_win_scoring or not _stop_for_math_if_decided()):
             _submit_available()
         while pending and not duel_loop_break:
             now = time.monotonic()
@@ -4250,6 +4350,9 @@ def _run_parallel_duel(
                                 wins = sum(1 for r in rounds if r.scored and r.winner == "challenger")
                                 losses = sum(1 for r in rounds if r.scored and r.winner == "king")
                                 ties = sum(1 for r in rounds if r.scored and r.winner == "tie")
+                                king_score_mean, challenger_score_mean, score_mean_delta, scored_mean_rounds = (
+                                    _duel_score_mean_delta(rounds)
+                                )
                                 with published_artifact_lock:
                                     artifact_task_names = list(published_artifact_task_names)
                                 on_round_complete(
@@ -4260,6 +4363,12 @@ def _run_parallel_duel(
                                     scored=wins + losses,
                                     threshold=losses + margin + 1,
                                     rounds=rounds,
+                                    scoring_method=scoring_method,
+                                    mean_score_margin=mean_score_margin,
+                                    king_score_mean=king_score_mean,
+                                    challenger_score_mean=challenger_score_mean,
+                                    score_mean_delta=score_mean_delta,
+                                    score_mean_rounds=scored_mean_rounds,
                                     task_names=[task.task_name for task in tasks],
                                     artifact_task_names=artifact_task_names,
                                     phase="paused_provider_account_error",
@@ -4274,7 +4383,8 @@ def _run_parallel_duel(
                         partial_shutdown_interrupt = bool(task_queue)
                         continue
                     elif (
-                        result.challenger_exit_reason == "time_limit_exceeded"
+                        use_round_win_scoring
+                        and result.challenger_exit_reason == "time_limit_exceeded"
                         and result.winner != "challenger"
                     ):
                         # Only unproductive timeouts count toward the cutoff: an
@@ -4291,7 +4401,7 @@ def _run_parallel_duel(
                     results_since_progress_emit += 1
                     _stop_for_dq_if_detected()
                     undrained_done = len(done_list) - done_index - 1
-                    math_stopped = _stop_for_math_if_decided(extra_unresolved=undrained_done)
+                    math_stopped = use_round_win_scoring and _stop_for_math_if_decided(extra_unresolved=undrained_done)
                     if math_stopped:
                         _emit_progress()
                         last_result_progress_emit_at = time.monotonic()
@@ -4376,12 +4486,12 @@ def _run_parallel_duel(
             if completed_this_slice:
                 if duel_loop_break:
                     break
-                if stop_submitting_reason is None and not _stop_for_math_if_decided():
+                if stop_submitting_reason is None and (not use_round_win_scoring or not _stop_for_math_if_decided()):
                     _submit_available()
                 last_heartbeat_at = time.monotonic()
                 continue
 
-            if _stop_for_dq_if_detected() or _stop_for_math_if_decided():
+            if _stop_for_dq_if_detected() or (use_round_win_scoring and _stop_for_math_if_decided()):
                 _emit_progress()
                 duel_loop_break = True
                 break
@@ -4436,9 +4546,23 @@ def _run_parallel_duel(
     if scored_rounds == 0:
         raise RetryableDuelError(_zero_scored_duel_reason(duel_id, rounds))
 
-    challenger_won = _challenger_wins(wins, losses, margin)
-    log.info("Duel %d result: W=%d L=%d T=%d (decisive=%d, challenger_wins=%s)",
-             duel_id, wins, losses, ties, decisive, challenger_won)
+    king_score_mean, challenger_score_mean, score_mean_delta, scored_mean_rounds = _duel_score_mean_delta(rounds)
+    if use_round_win_scoring:
+        challenger_won = _challenger_wins(wins, losses, margin)
+    else:
+        challenger_won = _challenger_wins_by_mean_score(rounds, margin=mean_score_margin)
+    log.info(
+        "Duel %d result: W=%d L=%d T=%d (decisive=%d, mean_delta=%.4f over %d round(s), scoring=%s, challenger_wins=%s)",
+        duel_id,
+        wins,
+        losses,
+        ties,
+        decisive,
+        score_mean_delta,
+        scored_mean_rounds,
+        scoring_method,
+        challenger_won,
+    )
 
     king_replaced = False
     dq_reason = dq_stop_reason
@@ -4452,23 +4576,54 @@ def _run_parallel_duel(
             log.warning("Duel %d: %s", duel_id, dq_reason)
         else:
             king_replaced = True
-            log.info("Duel %d: challenger uid=%s WINS (%d/%d decisive)",
-                     duel_id, challenger.uid, wins, decisive)
+            if use_round_win_scoring:
+                log.info(
+                    "Duel %d: challenger uid=%s WINS (%d/%d decisive)",
+                    duel_id,
+                    challenger.uid,
+                    wins,
+                    decisive,
+                )
+            else:
+                log.info(
+                    "Duel %d: challenger uid=%s WINS by mean score (challenger=%.4f king=%.4f delta=%.4f margin=%.4f)",
+                    duel_id,
+                    challenger.uid,
+                    challenger_score_mean,
+                    king_score_mean,
+                    score_mean_delta,
+                    mean_score_margin,
+                )
     else:
-        log.info(
-            "Duel %d: king defends (challenger uid=%s got %dW/%dL, needed >%dW)",
-            duel_id,
-            challenger.uid,
-            wins,
-            losses,
-            losses + margin,
-        )
+        if use_round_win_scoring:
+            log.info(
+                "Duel %d: king defends (challenger uid=%s got %dW/%dL, needed >%dW)",
+                duel_id,
+                challenger.uid,
+                wins,
+                losses,
+                losses + margin,
+            )
+        else:
+            log.info(
+                "Duel %d: king defends (challenger uid=%s mean_delta=%.4f, needed >=%.4f)",
+                duel_id,
+                challenger.uid,
+                score_mean_delta,
+                mean_score_margin,
+            )
 
     return DuelResult(
         duel_id=duel_id, started_at=started_at, finished_at=_timestamp(),
         king_before=king, challenger=challenger, rounds=rounds,
         wins=wins, losses=losses, ties=ties,
         king_after=king_after, king_replaced=king_replaced,
+        scoring_method=scoring_method,
+        mean_score_margin=mean_score_margin,
+        king_score_mean=king_score_mean,
+        challenger_score_mean=challenger_score_mean,
+        score_mean_delta=score_mean_delta,
+        score_mean_rounds=scored_mean_rounds,
         disqualification_reason=dq_reason,
     )
 
@@ -4504,15 +4659,26 @@ def validate_loop_run(config: RunConfig) -> ValidateStageResult:
     judge_log_path = configure_diff_judge_log(config.validate_root)
     log.info("Diff judge telemetry log: %s", judge_log_path)
     _kill_stale_containers()
-    log.info(
-        "Scoring: %d rounds per duel, round score is 100%% LLM diff judge (%s); "
-        "LLM ties stay ties; decisive wins need >=%.0f%% combined-score gap; "
-        "patch similarity is telemetry only, ties ignored, challenger must beat king by >%d decisive round(s)",
-        config.validate_duel_rounds,
-        _DIFF_JUDGE_MODEL,
-        _ROUND_SCORE_WIN_MARGIN * 100,
-        config.validate_win_margin,
-    )
+    duel_scoring_method = _normalize_duel_scoring_method(config.validate_duel_scoring_method)
+    if duel_scoring_method == _DUEL_SCORING_MEAN:
+        log.info(
+            "Scoring: %d rounds per duel, round score is 100%% LLM diff judge (%s); "
+            "promotion uses paired raw mean score with challenger margin >=%.4f; "
+            "patch similarity is telemetry only",
+            config.validate_duel_rounds,
+            _DIFF_JUDGE_MODEL,
+            config.validate_mean_score_margin,
+        )
+    else:
+        log.info(
+            "Scoring: %d rounds per duel, round score is 100%% LLM diff judge (%s); "
+            "LLM ties stay ties; decisive wins need >=%.0f%% combined-score gap; "
+            "patch similarity is telemetry only, ties ignored, challenger must beat king by >%d decisive round(s)",
+            config.validate_duel_rounds,
+            _DIFF_JUDGE_MODEL,
+            _ROUND_SCORE_WIN_MARGIN * 100,
+            config.validate_win_margin,
+        )
 
     if not config.validate_wallet_name or not config.validate_wallet_hotkey:
         raise ValueError("validate requires --wallet-name and --wallet-hotkey")
@@ -5056,6 +5222,12 @@ def validate_loop_run(config: RunConfig) -> ValidateStageResult:
                             "challenger_repo_url": None,
                             "threshold": config.validate_win_margin + 1,
                             "win_margin": config.validate_win_margin,
+                            "scoring_method": duel_scoring_method,
+                            "mean_score_margin": config.validate_mean_score_margin,
+                            "king_score_mean": 0.0,
+                            "challenger_score_mean": 0.0,
+                            "score_mean_delta": 0.0,
+                            "score_mean_rounds": 0,
                             "duel_rounds": config.validate_duel_rounds,
                             "task_set_phase": duel_task_set_phase,
                             "confirmation_of_duel_id": manual_retest_of_duel_id,
@@ -5119,6 +5291,13 @@ def validate_loop_run(config: RunConfig) -> ValidateStageResult:
                                     "challenger_repo": _challenger.hotkey,
                                     "challenger_repo_url": None,
                                     "threshold": threshold,
+                                    "win_margin": config.validate_win_margin,
+                                    "scoring_method": kw.get("scoring_method", duel_scoring_method),
+                                    "mean_score_margin": kw.get("mean_score_margin", config.validate_mean_score_margin),
+                                    "king_score_mean": kw.get("king_score_mean", 0.0),
+                                    "challenger_score_mean": kw.get("challenger_score_mean", 0.0),
+                                    "score_mean_delta": kw.get("score_mean_delta", 0.0),
+                                    "score_mean_rounds": kw.get("score_mean_rounds", 0),
                                     "duel_rounds": config.validate_duel_rounds,
                                     "task_set_phase": task_set_phase,
                                     "confirmation_of_duel_id": confirmation_of_duel_id,
@@ -5308,8 +5487,14 @@ def validate_loop_run(config: RunConfig) -> ValidateStageResult:
                                 "challenger_hotkey": challenger.hotkey,
                                 "challenger_repo": challenger.hotkey,
                                 "challenger_repo_url": None,
-                                    "threshold": config.validate_win_margin + 1,
+                                "threshold": config.validate_win_margin + 1,
                                 "win_margin": config.validate_win_margin,
+                                "scoring_method": duel_scoring_method,
+                                "mean_score_margin": config.validate_mean_score_margin,
+                                "king_score_mean": 0.0,
+                                "challenger_score_mean": 0.0,
+                                "score_mean_delta": 0.0,
+                                "score_mean_rounds": 0,
                                 "duel_rounds": config.validate_duel_rounds,
                                 "task_set_phase": "confirmation_retest",
                                 "confirmation_of_duel_id": duel_result.duel_id,
@@ -5736,24 +5921,35 @@ def _publish_dashboard(
         1 for d in history for r in d.get("rounds", [])
         if r.get("winner") not in ("tie", None)
     )
+    scoring_method = _normalize_duel_scoring_method(config.validate_duel_scoring_method)
+    if scoring_method == _DUEL_SCORING_MEAN:
+        scoring_description = (
+            "Round score is the LLM diff judgment of how well each patch satisfies the task. "
+            "Promotion uses the paired raw mean score across all scored rounds: challenger mean "
+            f"must exceed king mean by at least {config.validate_mean_score_margin:.4f}. "
+            "Patch similarity is retained as telemetry and for copy detection."
+        )
+    else:
+        scoring_description = (
+            "Round score is the LLM diff judgment of how well each patch satisfies the task. "
+            "LLM-declared ties always remain round ties. Decisive wins require a combined-score gap of at least "
+            f"{_ROUND_SCORE_WIN_MARGIN:.0%}. Patch similarity is retained as telemetry and for pool operations. "
+            "Challenger must win more decisive rounds than the king plus margin (ties ignored)"
+        )
     status = {
         "validator_started_at": validator_started_at,
         "netuid": config.validate_netuid,
         "scoring": {
-            "method": "race",
+            "method": scoring_method,
             "duel_rounds": config.validate_duel_rounds,
             "win_margin": config.validate_win_margin,
+            "mean_score_margin": config.validate_mean_score_margin,
             "patch_similarity_weight": 1.0 - _DIFF_JUDGE_WEIGHT,
             "cursor_similarity_weight": 1.0 - _DIFF_JUDGE_WEIGHT,
             "llm_diff_judge_weight": _DIFF_JUDGE_WEIGHT,
             "llm_diff_judge_model": _DIFF_JUDGE_MODEL,
             "ties_count": False,
-            "description": (
-                "Round score is the LLM diff judgment of how well each patch satisfies the task. "
-                "LLM-declared ties always remain round ties. Decisive wins require a combined-score gap of at least "
-                f"{_ROUND_SCORE_WIN_MARGIN:.0%}. Patch similarity is retained as telemetry and for pool operations. "
-                "Challenger must win more decisive rounds than the king plus margin (ties ignored)"
-            ),
+            "description": scoring_description,
             "round_score_win_margin": _ROUND_SCORE_WIN_MARGIN,
         },
         "queue": [
@@ -5851,8 +6047,12 @@ _DASHBOARD_DUEL_PUBLISH_KEYS = {
     "challenger_commitment_block",
     "king_similarity_ratio_mean",
     "challenger_similarity_ratio_mean",
+    "scoring_method",
+    "mean_score_margin",
     "king_score_mean",
     "challenger_score_mean",
+    "score_mean_delta",
+    "score_mean_rounds",
     "king_llm_score_mean",
     "challenger_llm_score_mean",
     "wins",

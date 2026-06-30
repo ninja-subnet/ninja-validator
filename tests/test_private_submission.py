@@ -1604,7 +1604,15 @@ class PrivateSubmissionApiTest(unittest.TestCase):
             )
 
         args = SimpleNamespace(agent_timeout=123, judge_model=None)
-        with patch.dict(os.environ, {"OPENROUTER_API_KEY": "test-key"}, clear=False):
+        with patch.dict(
+            os.environ,
+            {
+                "OPENROUTER_API_KEY": "test-key",
+                "PRIVATE_SUBMISSION_JUDGE_PROVIDER_ONLY": "z-ai/fp8",
+                "PRIVATE_SUBMISSION_JUDGE_PROVIDER_ALLOW_FALLBACKS": "false",
+            },
+            clear=False,
+        ):
             with patch("openrouter_client.complete_text", side_effect=fake_complete_text):
                 judge = _build_private_submission_openrouter_judge(args)
                 result = judge(
@@ -1621,6 +1629,7 @@ class PrivateSubmissionApiTest(unittest.TestCase):
         self.assertEqual(call["model"], "google/gemini-3.1-flash-lite")
         self.assertEqual(call["temperature"], 0)
         self.assertIsNone(call["reasoning"])
+        self.assertEqual(call["provider"], {"only": ["z-ai/fp8"], "allow_fallbacks": False})
         self.assertIn("CI gatekeeping judge", call["system_prompt"])
         self.assertIn("private Subnet 66 ninja submission API", call["system_prompt"])
         self.assertIn("Your only job", call["system_prompt"])

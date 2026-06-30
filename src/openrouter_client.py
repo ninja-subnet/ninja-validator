@@ -49,7 +49,7 @@ class HttpxLLMClient(LLMClient):
         else:
             # Provider routing is OpenRouter-only; a self-hosted vLLM endpoint
             # rejects/ignores it.
-            provider = _provider_preferences_from_env()
+            provider = request.provider or _provider_preferences_from_env()
             if provider is not None:
                 payload["provider"] = provider
         headers = {
@@ -102,6 +102,7 @@ def complete_text(
     seed: int | None = None,
     reasoning: dict[str, Any] | None = None,
     cache_control: dict[str, Any] | None = None,
+    provider: dict[str, Any] | None = None,
     rate_limit_retries: int = 1,
 ) -> str:
     request = LLMRequest(
@@ -114,6 +115,7 @@ def complete_text(
         seed=seed,
         reasoning=reasoning,
         cache_control=cache_control,
+        provider=provider,
     )
     client = _build_client(openrouter_api_key)
     max_rate_limit_retries = max(1, int(rate_limit_retries))

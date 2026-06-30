@@ -375,6 +375,50 @@ class R2PublicSanitizationTest(unittest.TestCase):
         self.assertEqual(summary["challenger_uid"], 197)
         self.assertEqual(summary["challenger_commit_sha"], "challenger-sha")
 
+    def test_duel_summary_includes_mean_score_aggregates(self):
+        summary = duel_to_summary(
+            {
+                "duel_id": 55,
+                "king_before": {},
+                "challenger": {},
+                "scoring_method": "mean_score",
+                "mean_score_margin": 0.03,
+                "king_score_mean": 0.5,
+                "challenger_score_mean": 0.55,
+                "score_mean_delta": 0.05,
+                "score_mean_rounds": 2,
+                "rounds": [
+                    {"task_name": "a", "winner": "king", "king_score": 0.8, "challenger_score": 0.6},
+                    {"task_name": "b", "winner": "challenger", "king_score": 0.2, "challenger_score": 0.5},
+                ],
+            }
+        )
+
+        self.assertEqual(summary["scoring_method"], "mean_score")
+        self.assertEqual(summary["mean_score_margin"], 0.03)
+        self.assertEqual(summary["king_score_mean"], 0.5)
+        self.assertEqual(summary["challenger_score_mean"], 0.55)
+        self.assertAlmostEqual(summary["score_mean_delta"], 0.05)
+        self.assertEqual(summary["score_mean_rounds"], 2)
+
+    def test_duel_summary_does_not_derive_missing_mean_score_aggregates(self):
+        summary = duel_to_summary(
+            {
+                "duel_id": 56,
+                "king_before": {},
+                "challenger": {},
+                "rounds": [
+                    {"task_name": "a", "winner": "king", "king_score": 0.8, "challenger_score": 0.6},
+                    {"task_name": "b", "winner": "challenger", "king_score": 0.2, "challenger_score": 0.5},
+                ],
+            }
+        )
+
+        self.assertIsNone(summary["king_score_mean"])
+        self.assertIsNone(summary["challenger_score_mean"])
+        self.assertIsNone(summary["score_mean_delta"])
+        self.assertIsNone(summary["score_mean_rounds"])
+
     def test_publish_duel_index_includes_identity_metadata(self):
         client = FakeS3Client()
         summary = {
@@ -397,6 +441,12 @@ class R2PublicSanitizationTest(unittest.TestCase):
             "challenger_pr_url": "https://github.com/unarbos/ninja/pull/945",
             "challenger_commit_sha": "challenger-sha",
             "challenger_commitment_block": 456,
+            "scoring_method": "mean_score",
+            "mean_score_margin": 0.03,
+            "king_score_mean": 0.42,
+            "challenger_score_mean": 0.47,
+            "score_mean_delta": 0.05,
+            "score_mean_rounds": 24,
             "wins": 8,
             "losses": 24,
             "ties": 0,
@@ -420,6 +470,12 @@ class R2PublicSanitizationTest(unittest.TestCase):
         self.assertEqual(entry["challenger_commit_sha"], "challenger-sha")
         self.assertEqual(entry["disqualification_reason"], "copy detected (6 near-exact rounds >= 0.98)")
         self.assertEqual(entry["confirmation_of_duel_id"], 43)
+        self.assertEqual(entry["scoring_method"], "mean_score")
+        self.assertEqual(entry["mean_score_margin"], 0.03)
+        self.assertEqual(entry["king_score_mean"], 0.42)
+        self.assertEqual(entry["challenger_score_mean"], 0.47)
+        self.assertEqual(entry["score_mean_delta"], 0.05)
+        self.assertEqual(entry["score_mean_rounds"], 24)
 
     def test_publish_training_data_deletes_legacy_public_file_without_uploading(self):
         client = FakeS3Client()

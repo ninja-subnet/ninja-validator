@@ -88,6 +88,30 @@ class OpenRouterClientTest(unittest.TestCase):
         self.assertEqual(text, "ok")
         self.assertEqual(client.request_json["cache_control"], {"type": "ephemeral"})
 
+    def test_complete_text_passes_provider_override(self):
+        client = _FakeClient(
+            {
+                "choices": [
+                    {"message": {"content": "ok"}, "finish_reason": "stop"},
+                ],
+            },
+        )
+
+        with patch("openrouter_client.httpx.Client", return_value=client):
+            text = complete_text(
+                prompt="judge",
+                model="z-ai/glm-5.2",
+                timeout=10,
+                openrouter_api_key="key",
+                provider={"only": ["z-ai/fp8"], "allow_fallbacks": False},
+            )
+
+        self.assertEqual(text, "ok")
+        self.assertEqual(
+            client.request_json["provider"],
+            {"only": ["z-ai/fp8"], "allow_fallbacks": False},
+        )
+
     def test_complete_text_passes_structured_content_blocks(self):
         client = _FakeClient(
             {

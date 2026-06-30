@@ -726,8 +726,6 @@ def duel_to_summary(duel_dict: dict[str, Any]) -> dict[str, Any]:
     scored_rounds = [r for r in rounds if r.get("error") is None or _is_task_error_round_dict(r)]
     king_ratios = [r["king_similarity_ratio"] for r in scored_rounds if "king_similarity_ratio" in r]
     challenger_ratios = [r["challenger_similarity_ratio"] for r in scored_rounds if "challenger_similarity_ratio" in r]
-    king_scores = [r["king_score"] for r in scored_rounds if "king_score" in r]
-    challenger_scores = [r["challenger_score"] for r in scored_rounds if "challenger_score" in r]
     king_llm_scores = [r["king_llm_score"] for r in scored_rounds if "king_llm_score" in r]
     challenger_llm_scores = [r["challenger_llm_score"] for r in scored_rounds if "challenger_llm_score" in r]
 
@@ -763,8 +761,12 @@ def duel_to_summary(duel_dict: dict[str, Any]) -> dict[str, Any]:
         "challenger_commitment_block": challenger.get("commitment_block"),
         "king_similarity_ratio_mean": (sum(king_ratios) / len(king_ratios)) if king_ratios else 0.0,
         "challenger_similarity_ratio_mean": (sum(challenger_ratios) / len(challenger_ratios)) if challenger_ratios else 0.0,
-        "king_score_mean": (sum(king_scores) / len(king_scores)) if king_scores else 0.0,
-        "challenger_score_mean": (sum(challenger_scores) / len(challenger_scores)) if challenger_scores else 0.0,
+        "king_score_mean": duel_dict.get("king_score_mean"),
+        "challenger_score_mean": duel_dict.get("challenger_score_mean"),
+        "score_mean_delta": duel_dict.get("score_mean_delta"),
+        "score_mean_rounds": duel_dict.get("score_mean_rounds"),
+        "scoring_method": duel_dict.get("scoring_method"),
+        "mean_score_margin": duel_dict.get("mean_score_margin"),
         "king_llm_score_mean": (sum(king_llm_scores) / len(king_llm_scores)) if king_llm_scores else 0.0,
         "challenger_llm_score_mean": (sum(challenger_llm_scores) / len(challenger_llm_scores)) if challenger_llm_scores else 0.0,
         "wins": duel_dict.get("wins", 0),
@@ -1133,6 +1135,12 @@ def publish_duel_index(
             "challenger_commit_sha": summary.get("challenger_commit_sha"),
             "challenger_display_commit_sha": summary.get("challenger_display_commit_sha"),
             "challenger_commitment_block": summary.get("challenger_commitment_block"),
+            "scoring_method": summary.get("scoring_method"),
+            "mean_score_margin": summary.get("mean_score_margin"),
+            "king_score_mean": summary.get("king_score_mean"),
+            "challenger_score_mean": summary.get("challenger_score_mean"),
+            "score_mean_delta": summary.get("score_mean_delta"),
+            "score_mean_rounds": summary.get("score_mean_rounds"),
             "king_replaced": summary.get("king_replaced", False),
             "disqualification_reason": summary.get("disqualification_reason"),
             "confirmation_duel_id": summary.get("confirmation_duel_id"),

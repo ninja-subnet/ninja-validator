@@ -24,7 +24,9 @@ from tau.rollouts.export_hf import (
     clear_uploaded_rollout_tasks,
     export_retired_rollouts_to_hf,
     export_task_rollouts_to_hf,
+    load_export_manifest,
     rollout_export_enabled,
+    rollout_export_manifest_path,
 )
 from workspace import build_solution_paths, resolve_task_paths, write_json
 
@@ -35,6 +37,9 @@ _TASK_ARCHIVE_UPLOAD_LOCK = threading.Lock()
 _SAVED_TASK_FILL_LOCK = threading.Lock()
 _SAVED_TASK_FILL_IN_FLIGHT: set[str] = set()
 _SAVED_TASK_FILL_IN_FLIGHT_FINGERPRINTS: dict[str, str] = {}
+_POOL_FILL_IN_FLIGHT_NAMES: set[str] = set()
+_ROLLOUT_EXPORT_EXCLUDE_LOCK = threading.Lock()
+_ROLLOUT_EXPORT_EXCLUDE_CACHE: dict[Path, tuple[int, set[str], set[str]]] = {}
 _POOL_FILL_ADD_LOCK = threading.Lock()
 _POOL_FILLER_WORKER_OVERSUBSCRIBE = 1
 # Throttle concurrent GitHub-sourced task generation independently of solve
@@ -170,6 +175,65 @@ def _pool_task_roots_from_disk(config: RunConfig) -> list[Path]:
         if isinstance(task_root, str) and task_root:
             roots.append(Path(task_root))
     return roots
+
+
+def _rollout_exported_task_exclusions(config: RunConfig) -> tuple[set[str], set[str]]:
+    root = config.resolved_rollout_root()
+    manifest_path = rollout_export_manifest_path(root)
+    try:
+        manifest_mtime = manifest_path.stat().st_mtime_ns
+    except OSError:
+        manifest_mtime = -1
+    with _ROLLOUT_EXPORT_EXCLUDE_LOCK:
+        cached = _ROLLOUT_EXPORT_EXCLUDE_CACHE.get(manifest_path)
+        if cached is not None and cached[0] == manifest_mtime:
+            return set(cached[1]), set(cached[2])
+
+    manifest = load_export_manifest(root)
+    tasks = manifest.get("tasks") if isinstance(manifest, dict) else {}
+    names = {
+        str(task_name)
+        for task_name, entry in (tasks.items() if isinstance(tasks, dict) else [])
+        if isinstance(entry, dict) and entry.get("hf_path")
+    }
+    fingerprints = _task_root_fingerprints(config.tasks_root / name for name in names)
+
+    with _ROLLOUT_EXPORT_EXCLUDE_LOCK:
+        _ROLLOUT_EXPORT_EXCLUDE_CACHE[manifest_path] = (manifest_mtime, set(names), set(fingerprints))
+    return names, fingerprints
+
+
+def rollout_exported_task_names(config: RunConfig) -> set[str]:
+    names, _ = _rollout_exported_task_exclusions(config)
+    return names
+
+
+def rollout_exported_task_fingerprints(config: RunConfig) -> set[str]:
+    _, fingerprints = _rollout_exported_task_exclusions(config)
+    return fingerprints
+
+
+def in_flight_pool_task_names() -> set[str]:
+    with _SAVED_TASK_FILL_LOCK:
+        return (
+            set(_SAVED_TASK_FILL_IN_FLIGHT)
+            | set(_SAVED_TASK_FILL_IN_FLIGHT_FINGERPRINTS)
+            | set(_POOL_FILL_IN_FLIGHT_NAMES)
+        )
+
+
+def claim_pool_fill_name(task_name: str | None) -> None:
+    if not task_name:
+        return
+    with _SAVED_TASK_FILL_LOCK:
+        _POOL_FILL_IN_FLIGHT_NAMES.add(task_name)
+
+
+def release_pool_fill_name(task_name: str | None) -> None:
+    if not task_name:
+        return
+    with _SAVED_TASK_FILL_LOCK:
+        _POOL_FILL_IN_FLIGHT_NAMES.discard(task_name)
 
 
 def archived_task_fingerprints(config: RunConfig) -> set[str]:
@@ -966,6 +1030,7 @@ def claim_saved_task_for_pool(
             pool.names()
             | pool_task_names_from_disk(config.validate_root)
             | archived_task_names(config)
+            | rollout_exported_task_names(config)
             | (extra_exclude or set())
         )
         existing_fingerprints = (
@@ -974,6 +1039,7 @@ def claim_saved_task_for_pool(
             | _task_root_fingerprints(config.tasks_root / name for name in (extra_exclude or set()))
             | set(_SAVED_TASK_FILL_IN_FLIGHT_FINGERPRINTS.values())
             | archived_task_fingerprints(config)
+            | rollout_exported_task_fingerprints(config)
         )
         candidates: list[tuple[Path, str | None]] = []
         for task_dir in sorted(config.tasks_root.glob("validate-*"), key=lambda p: p.name):
@@ -1097,6 +1163,7 @@ def _prepare_one_task_for_pool(
     saved_task_name: str | None = None
     archive_reservation_name: str | None = None
     archive_reservation_hour: str | None = None
+    reserved_task_name: str | None = None
     reserved_fingerprint_name: str | None = None
     added_to_pool = False
     try:
@@ -1111,10 +1178,14 @@ def _prepare_one_task_for_pool(
                 return False
             task_name = saved_task_root.name
             saved_task_name = task_name
+            claim_pool_fill_name(task_name)
+            reserved_task_name = task_name
             task_root = str(saved_task_root)
             log.info("Pool manager[%s]: reusing saved task %s", pool_label, task_name)
         else:
             task_name = _allocate_and_save_task_name(config, state_lock)
+            claim_pool_fill_name(task_name)
+            reserved_task_name = task_name
             if archive_rotation:
                 reservation = reserve_archive_quota(config=config, task_name=task_name, pool_label=pool_label)
                 if reservation is None:
@@ -1139,6 +1210,9 @@ def _prepare_one_task_for_pool(
         if v._count_patch_lines(Path(task_root) / "task" / "reference.patch") < v._MIN_PATCH_LINES:
             log.info("Pool manager[%s]: skipping %s (patch too small)", pool_label, task_name)
             return False
+        if task_name in rollout_exported_task_names(config):
+            log.info("Pool manager[%s]: skipping %s (rollout already exported)", pool_label, task_name)
+            return False
 
         # Reject duplicate task content BEFORE spending any baseline/king solve
         # compute. The insert-time check below remains the final guard; this
@@ -1153,6 +1227,7 @@ def _prepare_one_task_for_pool(
                     | _task_root_fingerprints(_pool_task_roots_from_disk(config))
                     | set(_SAVED_TASK_FILL_IN_FLIGHT_FINGERPRINTS.values())
                     | archived_task_fingerprints(config)
+                    | rollout_exported_task_fingerprints(config)
                 )
                 if early_fingerprint in known_fingerprints:
                     log.info("Pool manager[%s]: skipping %s (duplicate task content, pre-solve)", pool_label, task_name)
@@ -1224,6 +1299,9 @@ def _prepare_one_task_for_pool(
             leased_task_names = v._active_duel_task_names(current_state)
             pending_archive_names = pending_archive_task_names(config)
             candidate_fingerprint = task_content_fingerprint(Path(candidate.task_root))
+            if candidate.task_name in rollout_exported_task_names(config):
+                log.info("Pool manager[%s]: skipping %s (rollout exported before insert)", pool_label, task_name)
+                return False
             existing_fingerprints = (
                 _task_root_fingerprints(_pool_task_roots(pool))
                 | _task_root_fingerprints(_pool_task_roots_from_disk(config))
@@ -1235,6 +1313,7 @@ def _prepare_one_task_for_pool(
                     if name != task_name
                 }
                 | archived_task_fingerprints(config)
+                | rollout_exported_task_fingerprints(config)
             )
             if candidate_fingerprint and candidate_fingerprint in existing_fingerprints:
                 log.info("Pool manager[%s]: skipping %s (duplicate task content)", pool_label, task_name)
@@ -1309,6 +1388,7 @@ def _prepare_one_task_for_pool(
         return False
     finally:
         release_saved_task_claim(saved_task_name)
+        release_pool_fill_name(reserved_task_name)
         if reserved_fingerprint_name is not None and reserved_fingerprint_name != saved_task_name:
             release_saved_task_claim(reserved_fingerprint_name)
         release_archive_reservation(config=config, task_name=archive_reservation_name)
@@ -1320,8 +1400,7 @@ def cleanup_old_task_workspaces(config: RunConfig, pools: Sequence[v.TaskPool]) 
     keep_names = active_duel_task_names(config) | pending_archive_delete_task_names(config)
     for pool in pools:
         keep_names |= pool.names()
-    with _SAVED_TASK_FILL_LOCK:
-        keep_names |= set(_SAVED_TASK_FILL_IN_FLIGHT)
+    keep_names |= in_flight_pool_task_names()
     v._cleanup_old_tasks(
         config.tasks_root,
         keep_names=keep_names,
@@ -1422,7 +1501,12 @@ def run_pool_manager(config: RunConfig) -> None:
             removed = retry_pending_archived_task_deletes(config, (pool, retest_pool))
             if removed:
                 log.info("Completed local deletion for %d archived task(s)", removed)
-            active_rollout_tasks = pool.names() | retest_pool.names() | active_duel_task_names(config)
+            active_rollout_tasks = (
+                pool.names()
+                | retest_pool.names()
+                | active_duel_task_names(config)
+                | in_flight_pool_task_names()
+            )
             try:
                 exported_rollouts = export_retired_rollouts_to_hf(
                     config=config,

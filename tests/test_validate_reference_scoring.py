@@ -12,7 +12,9 @@ from validate import (
     ValidationRoundResult,
     ValidatorSubmission,
     _challenger_wins,
+    _challenger_wins_by_mean_score,
     _copy_detection_reason,
+    _duel_score_mean_delta,
     _diff_judge_prompt_injection_result,
     _duel_speed_stop_reason,
     _parse_diff_judge_payload,
@@ -41,6 +43,47 @@ class ReferenceScoringTest(unittest.TestCase):
         self.assertFalse(_challenger_wins(wins=2, losses=3, margin=0))
         self.assertTrue(_challenger_wins(wins=8, losses=2, margin=5))
         self.assertFalse(_challenger_wins(wins=7, losses=2, margin=5))
+
+    def test_challenger_wins_by_mean_score_margin(self):
+        rounds = [
+            ValidationRoundResult(
+                task_name="task-1",
+                winner="king",
+                king_lines=1,
+                challenger_lines=1,
+                king_similarity_ratio=0.0,
+                challenger_similarity_ratio=0.0,
+                king_challenger_similarity=0.0,
+                task_root="/tmp/task-1",
+                king_compare_root="",
+                challenger_compare_root="",
+                king_score=0.40,
+                challenger_score=0.35,
+            ),
+            ValidationRoundResult(
+                task_name="task-2",
+                winner="challenger",
+                king_lines=1,
+                challenger_lines=1,
+                king_similarity_ratio=0.0,
+                challenger_similarity_ratio=0.0,
+                king_challenger_similarity=0.0,
+                task_root="/tmp/task-2",
+                king_compare_root="",
+                challenger_compare_root="",
+                king_score=0.50,
+                challenger_score=0.60,
+            ),
+        ]
+
+        king_mean, challenger_mean, delta, scored = _duel_score_mean_delta(rounds)
+
+        self.assertEqual(scored, 2)
+        self.assertAlmostEqual(king_mean, 0.45)
+        self.assertAlmostEqual(challenger_mean, 0.475)
+        self.assertAlmostEqual(delta, 0.025)
+        self.assertTrue(_challenger_wins_by_mean_score(rounds, margin=0.02))
+        self.assertFalse(_challenger_wins_by_mean_score(rounds, margin=0.03))
 
     def test_speed_stop_waits_until_result_is_mathematically_decided(self):
         self.assertIsNone(
@@ -388,6 +431,8 @@ class ReferenceScoringTest(unittest.TestCase):
         with (
             patch("validate.resolve_task_paths", return_value=task_paths),
             patch("validate.resolve_solution_paths", side_effect=fake_solution_paths),
+            patch("validate._DIFF_JUDGE_PROVIDER_ONLY", "z-ai/fp8"),
+            patch("validate._DIFF_JUDGE_PROVIDER_ALLOW_FALLBACKS", "false"),
             patch("validate.complete_text", side_effect=fake_complete_text),
         ):
             result = validate._judge_round_diffs(
@@ -398,6 +443,7 @@ class ReferenceScoringTest(unittest.TestCase):
 
         self.assertEqual(len(calls), 1)
         self.assertEqual(calls[0]["rate_limit_retries"], 6)
+        self.assertEqual(calls[0]["provider"], {"only": ["z-ai/fp8"], "allow_fallbacks": False})
 
     def test_diff_judge_can_use_duel_scoped_semaphore_when_global_is_poisoned(self):
         def fake_complete_text(**kwargs):

@@ -23,6 +23,7 @@ class LLMRequest:
     seed: int | None = None
     reasoning: dict[str, Any] | None = None
     cache_control: dict[str, Any] | None = None
+    provider: dict[str, Any] | None = None
 
     def cache_key(self) -> str:
         return json_sha256({
@@ -35,6 +36,7 @@ class LLMRequest:
             "seed": self.seed,
             "reasoning": self.reasoning,
             "cache_control": self.cache_control,
+            "provider": self.provider,
         })
 
 
