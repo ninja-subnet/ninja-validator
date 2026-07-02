@@ -1,0 +1,25 @@
+%%{init: {"theme": "base", "themeVariables": {"fontSize": "15px"}}}%%
+flowchart LR
+    dr(["duel-resolver<br/>(singleton)"])
+    kings[("kings")]
+    subm[("submissions")]
+    reg[("registrations")]
+    tasks[("tasks")]
+    judg[("judgements")]
+    chal[("challenges")]
+    dres[("duel_resolutions")]
+
+    dr -. "R  reigning king" .-> kings
+    dr -. "R  ELIGIBLE challengers (oldest first)" .-> subm
+    dr -. "R  challenger still registered?" .-> reg
+    dr -. "R  pool tasks" .-> tasks
+    dr -. "R  tally wins/losses/ties" .-> judg
+    dr -. "R  active challenge" .-> chal
+    dr == "W  status POOL_ONE(1) / POOL_TWO(2) / CLOSED(0)" ==> chal
+    dr == "W  INSERT per-pool outcome + tally" ==> dres
+    dr == "W  INSERT new king (promote challenger)" ==> kings
+
+    classDef worker fill:#2563eb,stroke:#1e3a8a,color:#fff;
+    classDef store fill:#f59e0b,stroke:#b45309,color:#111;
+    class dr worker;
+    class kings,subm,reg,tasks,judg,chal,dres store;

@@ -1,0 +1,12 @@
+%%{init: {"theme": "base", "themeVariables": {"fontSize": "15px"}}}%%
+flowchart LR
+    cw(["chain-watcher"])
+    reg[("registrations")]
+
+    cw -. "R  latest (uid, hot, cold) per uid" .-> reg
+    cw == "W  INSERT (uid, ss58_hot, ss58_cold,<br/>block, block_date)<br/>ON CONFLICT (uid, block) DO NOTHING" ==> reg
+
+    classDef worker fill:#2563eb,stroke:#1e3a8a,color:#fff;
+    classDef store fill:#f59e0b,stroke:#b45309,color:#111;
+    class cw worker;
+    class reg store;

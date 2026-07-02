@@ -1,0 +1,16 @@
+%%{init: {"theme": "base", "themeVariables": {"fontSize": "15px"}}}%%
+flowchart LR
+    tg(["task-generator"])
+    kings[("kings")]
+    tasks[("tasks")]
+    tgf[("task_generation_failures")]
+
+    tg -. "R  reigning king<br/>(ORDER BY king_from DESC)" .-> kings
+    tg -. "R  count per pool where<br/>status_id != DISQUALIFIED" .-> tasks
+    tg == "W  INSERT status_id = CANDIDATE (0)<br/>+ pool_type, fingerprint, patch<br/>ON CONFLICT (content_fingerprint) DO NOTHING" ==> tasks
+    tg == "W  INSERT (append-only)<br/>when LLM fails every attempt" ==> tgf
+
+    classDef worker fill:#2563eb,stroke:#1e3a8a,color:#fff;
+    classDef store fill:#f59e0b,stroke:#b45309,color:#111;
+    class tg worker;
+    class kings,tasks,tgf store;

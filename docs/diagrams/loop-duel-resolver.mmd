@@ -1,0 +1,26 @@
+%%{init: {"theme": "base", "themeVariables": {"fontSize": "15px"}}}%%
+flowchart TB
+    start(["duel-resolver.main() — run ONE instance"]) --> snap["Snapshot arena (one transaction):<br/>reigning king, active challenge,<br/>next eligible challenger, judgement tally"]
+    snap --> king{"king reigns?"}
+    king -- no --> idle["sleep TAU_DUEL_POLL_SECONDS (5s)"]
+    king -- yes --> active{"active challenge?"}
+
+    active -- no --> chalq{"eligible challenger<br/>waiting?"}
+    chalq -- no --> idle
+    chalq -- yes --> open["OpenChallenge:<br/>INSERT challenges status=POOL_ONE(1)"]
+    open --> idle
+
+    active -- yes --> dereg{"challenger still<br/>registered?"}
+    dereg -- no --> close_d["CloseChallenge → CLOSED(0)<br/>duel_resolutions: CHALLENGER_DEREGISTERED(2)"]
+    dereg -- yes --> decide{"tally decides pool?<br/>wins > losses + win_margin"}
+
+    decide -- "challenger unbeatable, POOL_ONE" --> adv["AdvancePool → status POOL_TWO(2)<br/>duel_resolutions: CHALLENGER_WON(1)"]
+    decide -- "challenger unbeatable, POOL_TWO" --> promote["Promote → CLOSED(0)<br/>duel_resolutions: CHALLENGER_WON(1)<br/>INSERT kings (new king crowned)"]
+    decide -- "king cannot be caught" --> close_k["CloseChallenge → CLOSED(0)<br/>duel_resolutions: KING_WON(0)"]
+    decide -- "still in progress" --> idle
+
+    close_d --> idle
+    adv --> idle
+    promote --> idle
+    close_k --> idle
+    idle --> snap

@@ -1,0 +1,23 @@
+%%{init: {"theme": "base", "themeVariables": {"fontSize": "15px"}}}%%
+flowchart TB
+    start(["task-solver.main()"]) --> gather["Gather jobs up to MAX_CONTAINERS (4)"]
+    gather --> qjobs["1. Qualification jobs:<br/>CANDIDATE tasks for reigning king"]
+    qjobs --> cjobs["2. Challenger jobs (fill remainder):<br/>QUALIFIED tasks in active challenges<br/>with no challenger solution yet"]
+    cjobs --> pool["Run jobs concurrently<br/>(ThreadPoolExecutor, one sandbox each)"]
+
+    pool --> run["Per job: assemble work tree,<br/>run agent in hardened sandbox<br/>(king's agent to qualify /<br/>challenger's agent to solve)"]
+    run --> infra{"retryable infra fault?<br/>(EXIT_UPSTREAM_ERROR /<br/>EXIT_SANDBOX_ERROR)"}
+    infra -- yes --> leave["Persist nothing;<br/>leave task for retry"]
+    infra -- no --> kind{"qualification<br/>or challenger?"}
+
+    kind -- qualification --> qrule{"king succeeded AND<br/>changed lines ≥<br/>QUALIFY_MIN_CHANGED_LINES?"}
+    qrule -- yes --> qual["UPDATE tasks status_id=QUALIFIED(1)<br/>+ INSERT king task_solutions"]
+    qrule -- no --> disq["UPDATE tasks status_id=DISQUALIFIED(2)"]
+
+    kind -- challenger --> csave["INSERT task_solutions<br/>(solution, duration, exit_reason)<br/>— feeds the judge"]
+
+    leave --> sleep["sleep TAU_SOLVER_POLL_SECONDS (30s)"]
+    qual --> sleep
+    disq --> sleep
+    csave --> sleep
+    sleep --> gather

@@ -1,0 +1,33 @@
+%%{init: {"theme": "base", "themeVariables": {"fontSize": "15px"}}}%%
+stateDiagram-v2
+    direction TB
+    [*] --> Eligible: submission ingested<br/>(SubmissionStatus.ELIGIBLE)
+    Eligible --> Waiting: registered on chain,<br/>not yet king/challenger
+
+    Waiting --> PoolOne: duel-resolver opens challenge<br/>challenges.status = POOL_ONE (1)
+
+    state "POOL_ONE (best-of N)" as PoolOne
+    state "POOL_TWO (best-of N)" as PoolTwo
+
+    PoolOne --> PoolTwo: challenger unbeatable<br/>AdvancePool → status = POOL_TWO (2)<br/>duel_resolutions: CHALLENGER_WON
+    PoolOne --> Closed_KingDefends: king cannot be caught<br/>CloseChallenge → CLOSED (0)<br/>duel_resolutions: KING_WON
+    PoolOne --> Closed_Dereg: challenger deregistered<br/>CLOSED (0) · CHALLENGER_DEREGISTERED
+
+    PoolTwo --> Crowned: challenger unbeatable<br/>Promote → CLOSED (0) + insert kings row<br/>duel_resolutions: CHALLENGER_WON
+    PoolTwo --> Closed_KingDefends: king cannot be caught<br/>CLOSED (0) · KING_WON
+    PoolTwo --> Closed_Dereg: challenger deregistered<br/>CLOSED (0) · CHALLENGER_DEREGISTERED
+
+    state "New King crowned" as Crowned
+    state "Challenge CLOSED — king defends" as Closed_KingDefends
+    state "Challenge CLOSED — forfeit" as Closed_Dereg
+
+    Crowned --> [*]
+    Closed_KingDefends --> [*]
+    Closed_Dereg --> [*]
+
+    note right of PoolOne
+        Win rule (challenger perspective):
+        wins > losses + win_margin
+        Decided early when the result is
+        mathematically locked in.
+    end note

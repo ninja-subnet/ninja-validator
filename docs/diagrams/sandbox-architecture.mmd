@@ -1,0 +1,40 @@
+%%{init: {"theme": "base", "themeVariables": {"fontSize": "14px"}}}%%
+flowchart TB
+    subgraph host["Host / task-solver worker process (holds the real key)"]
+        direction TB
+        solver["task-solver loop"]
+        proxy["In-process LLM proxy<br/>• injects REAL upstream key<br/>• forces SOLVER_MODEL, temp=0, top_p=1<br/>• strips miner sampling params<br/>• enforces SOLVER_MAX_* budget<br/>• records usage / rollout"]
+        solver --> proxy
+    end
+
+    subgraph net["Docker network 'tau-sandbox-net' (internal = NO internet)"]
+        direction TB
+        subgraph box["Sandbox container (untrusted miner agent)"]
+            direction TB
+            harness["harness.py"]
+            agent["agent.py (miner code)"]
+            work["/work (bind mount, rw):<br/>repo/ · agent/ · task.txt"]
+            harness --> agent
+            agent --- work
+        end
+    end
+
+    upstream["LLM upstream<br/>(OpenRouter / ninja / custom)"]
+
+    agent -->|"only reachable host:<br/>proxy alias, Bearer = per-solve token"| proxy
+    proxy -->|"Authorization: real key"| upstream
+
+    solver -. "docker.sock:<br/>spawn sibling container" .-> box
+    solver -. "assemble work tree<br/>on TAU_SANDBOX_WORK_ROOT" .-> work
+
+    hard["Hardening: read-only rootfs · cap_drop ALL ·<br/>no-new-privileges · mem 2g · 1 cpu · pids 256 ·<br/>hard timeout 1800s · first-token timeout 300s"]
+    box --- hard
+
+    classDef trusted fill:#16a34a,stroke:#14532d,color:#fff;
+    classDef untrusted fill:#dc2626,stroke:#7f1d1d,color:#fff;
+    classDef ext fill:#e5e7eb,stroke:#6b7280,color:#111;
+    classDef info fill:#fef9c3,stroke:#ca8a04,color:#111;
+    class solver,proxy trusted;
+    class harness,agent,work untrusted;
+    class upstream ext;
+    class hard info;

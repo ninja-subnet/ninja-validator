@@ -1,0 +1,29 @@
+%%{init: {"theme": "base", "themeVariables": {"fontSize": "14px"}}}%%
+sequenceDiagram
+    autonumber
+    participant S as task-solver
+    participant D as Host Docker daemon
+    participant P as In-proc proxy
+    participant B as Sandbox (agent)
+    participant U as LLM upstream
+
+    S->>S: Pick job (task + agent bundle)
+    S->>S: Clone repo @ parent_sha,<br/>scrub git creds, assemble /work tree
+    S->>D: Ensure internal network 'tau-sandbox-net'
+    S->>P: Start proxy (real key, forced model,<br/>budget, per-solve token) on random port
+    S->>D: Run sandbox container (hardened,<br/>internal net, /work bind mount)
+    S->>B: exec harness.py<br/>(inject proxy URL + per-solve token)
+    B->>B: Load agent.py, call solve(repo, task, ...)
+    loop until solved / budget / timeout
+        B->>P: POST /v1/chat/completions<br/>Bearer = per-solve token
+        P->>P: Auth, force model/params,<br/>check + clamp budget
+        P->>U: Forward with REAL key injected
+        U-->>P: Completion
+        P-->>B: Relay response (key never seen)
+    end
+    B->>B: Compute authoritative git diff
+    B-->>S: __TAU_RESULT__ { success, patch, exit_reason }
+    S->>P: usage_snapshot() → classify infra vs miner fault
+    S->>D: Kill + remove container
+    S->>P: Stop proxy
+    S->>S: Persist result (or leave for retry if infra fault)

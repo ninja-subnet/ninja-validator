@@ -1,0 +1,20 @@
+# The build context is the repo root (compose `context: .`). Keep it lean and
+# never ship host-only artifacts into images. pyproject.toml, uv.lock and src/
+# are intentionally NOT ignored — the image builds depend on them.
+.git
+.gitignore
+.venv
+dist
+build
+*.egg-info
+**/__pycache__
+*.py[cod]
+
+# Secrets reach containers via env_file at runtime, never baked into an image.
+.env
+
+# Local tooling caches.
+.ruff_cache
+.pytest_cache
+.mypy_cache
+.claude

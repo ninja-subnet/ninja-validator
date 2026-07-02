@@ -1,0 +1,35 @@
+%%{init: {"theme": "base", "themeVariables": {"fontSize": "15px"}}}%%
+flowchart LR
+    chain["Bittensor<br/>Subnet 66"]
+    gh["GitHub<br/>commits"]
+
+    cw(["chain-watcher"])
+    tg(["task-generator"])
+    ts(["task-solver<br/>runs agents in sandboxes"])
+    jd(["judge"])
+    dr(["duel-resolver"])
+
+    subm[("submissions +<br/>registrations")]
+    tasks[("tasks<br/>= CANDIDATE")]
+    solved[("tasks = QUALIFIED<br/>+ task_solutions")]
+    judg[("judgements")]
+    reign[("kings + challenges<br/>+ duel_resolutions")]
+
+    chain --> cw --> subm
+    subm --> tg
+    gh --> tg
+    tg -->|"mine + describe commits"| tasks
+    tasks --> ts
+    ts -->|"king qualifies tasks;<br/>king &amp; challenger solve them"| solved
+    solved --> jd
+    jd -->|"blinded pairwise<br/>LLM comparison"| judg
+    judg --> dr
+    dr -->|"tally per pool;<br/>crown / defend"| reign
+    reign -.->|"new king → fresh task pools<br/>(king-of-the-hill loop)"| tg
+
+    classDef worker fill:#2563eb,stroke:#1e3a8a,color:#fff;
+    classDef store fill:#f59e0b,stroke:#b45309,color:#111;
+    classDef ext fill:#e5e7eb,stroke:#6b7280,color:#111;
+    class cw,tg,ts,jd,dr worker;
+    class subm,tasks,solved,judg,reign store;
+    class chain,gh ext;

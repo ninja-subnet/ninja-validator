@@ -1,0 +1,252 @@
+name: pg-stack
+
+services:
+  db:
+    image: postgres:17
+    container_name: pg_stack_db
+    restart: unless-stopped
+    env_file: .env
+    # POSTGRES_* vars create the role/db on first init. They are read from .env.
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+      # Initdb tuning: C collation + good defaults for predictable text sorting/perf.
+      POSTGRES_INITDB_ARGS: "--data-checksums"
+      # Where the cluster lives inside the named volume.
+      PGDATA: /var/lib/postgresql/data/pgdata
+    # Run with our tuned config instead of the stock one.
+    command:
+      - postgres
+      - -c
+      - config_file=/etc/postgresql/postgresql.conf
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      # Tuned server configuration. Mounted as a single file so the path resolves
+      # to a real file, not an empty bind-created directory (which is what makes
+      # `config_file=...` fail and the container come up unhealthy). Paths are
+      # relative to this file (repo root), hence the deploy/db/ prefix.
+      - ./deploy/db/postgresql.conf:/etc/postgresql/postgresql.conf:ro
+      # Init scripts run once, on an empty data dir, as the superuser. Mounted as
+      # a single file into the entrypoint's init directory; add more *.sh/*.sql
+      # mounts here if the template grows.
+      - ./deploy/db/00_init.sh:/docker-entrypoint-initdb.d/00_init.sh:ro
+    # Postgres uses /dev/shm for parallel workers, large hash/sort spills, etc.
+    # The Docker default is a tiny 64MB which causes "could not resize shared
+    # memory segment" errors under parallel query load. Give it real room.
+    shm_size: "1gb"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+    # Resource ceiling/floor for the container itself. Keep these >= the memory
+    # implied by postgresql.conf (shared_buffers + work_mem * connections, etc.).
+    deploy:
+      resources:
+        limits:
+          cpus: "4.0"
+          memory: 8G
+        reservations:
+          cpus: "2.0"
+          memory: 4G
+    ulimits:
+      nofile:
+        soft: 65536
+        hard: 65536
+
+  # One-shot service: waits for the DB to be healthy, applies all migrations,
+  # then exits. Re-running `docker compose up migrate` is safe and idempotent.
+  # Built from the repo root (context: .) so it can install the `tau` package,
+  # whose tau.db.models is what alembic/env.py points autogenerate at.
+  migrate:
+    build:
+      context: .
+      dockerfile: deploy/migrate/Dockerfile
+    container_name: pg_stack_migrate
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB}
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: "no"
+    command: ["alembic", "upgrade", "head"]
+
+  # Task-generator worker: mine GitHub commits -> LLM task descriptions ->
+  # CANDIDATE task rows for the reigning king. Reads OPENROUTER_API_KEY (and,
+  # ideally, GITHUB_TOKEN) from .env via env_file; idles while no king reigns.
+  task-generator:
+    build:
+      context: .
+      dockerfile: deploy/worker/Dockerfile
+      args:
+        EXTRA: task-generator   # [project.optional-dependencies] group to install
+        WORKER: task-generator  # [project.scripts] console script to run
+    container_name: pg_stack_task_generator
+    env_file: .env
+    environment:
+      # Reach the `db` service over the compose network, not localhost.
+      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB}
+    depends_on:
+      db:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    restart: unless-stopped
+
+  # Task-solver worker: qualify CANDIDATE tasks by running the reigning king's
+  # agent in a locked-down sandbox (-> QUALIFIED/DISQUALIFIED), then produce
+  # challenger solutions for active challenges (-> task_solutions, feeding the
+  # judge). It is docker-out-of-docker: it mounts the host Docker socket to spawn
+  # sibling sandbox containers. The agent reaches the LLM only through an in-proc
+  # proxy on a per-solve internal (internet-less) network; the upstream key never
+  # enters the sandbox. INSTALL_GIT=true adds git for the host-side task clone.
+  task-solver:
+    build:
+      context: .
+      dockerfile: deploy/worker/Dockerfile
+      args:
+        EXTRA: task-solver
+        WORKER: task-solver
+        INSTALL_GIT: "true"
+    container_name: pg_stack_task_solver
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB}
+      # The per-solve work tree is bind-mounted into each sandbox. The host daemon
+      # resolves that bind source, so the work root must be the SAME path on the host
+      # and in this container (the volume below mounts it same-path).
+      TAU_SANDBOX_WORK_ROOT: ${TAU_SANDBOX_WORK_ROOT:-/var/lib/tau/sandbox-work}
+    volumes:
+      # docker-out-of-docker: spawn sandbox containers on the host daemon.
+      - /var/run/docker.sock:/var/run/docker.sock
+      # Extracted miner submissions, mounted at the SAME path the worker reads
+      # (TAU_SUBMISSIONS_DIR from .env). Read-only; the worker only reads the bundles.
+      - ${TAU_SUBMISSIONS_DIR:-/srv/tau/submissions}:${TAU_SUBMISSIONS_DIR:-/srv/tau/submissions}:ro
+      # Shared work root, SAME path host<->container, so a sandbox's /work bind mount
+      # (a subdir written here by this worker) resolves on the host daemon.
+      - ${TAU_SANDBOX_WORK_ROOT:-/var/lib/tau/sandbox-work}:${TAU_SANDBOX_WORK_ROOT:-/var/lib/tau/sandbox-work}
+    depends_on:
+      db:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    restart: unless-stopped
+
+  # Submission qualification worker: keeps the next few live queue submissions
+  # security-qualified before the duel-resolver may open them as challengers. Run
+  # exactly one; it is intentionally sequential and writes guarded status changes.
+  qualification:
+    build:
+      context: .
+      dockerfile: deploy/worker/Dockerfile
+      args:
+        EXTRA: qualification
+        WORKER: qualification-worker
+    container_name: pg_stack_qualification
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB}
+    volumes:
+      # Extracted miner submissions, mounted at the SAME path the worker reads.
+      - ${TAU_SUBMISSIONS_DIR:-/srv/tau/submissions}:${TAU_SUBMISSIONS_DIR:-/srv/tau/submissions}:ro
+      # Optional current public base harness. If unset/missing, qualification runs
+      # in degraded mode and records base_files_available=false.
+      - ${TAU_QUALIFICATION_BASE_PATH:-/srv/tau/base-agent}:${TAU_QUALIFICATION_BASE_PATH:-/srv/tau/base-agent}:ro
+    depends_on:
+      db:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    restart: unless-stopped
+
+  # --- Worker template -------------------------------------------------------
+  # Every worker is the SAME image (deploy/worker/Dockerfile) built from the repo
+  # root, specialized by two build args:
+  #   EXTRA  -> which [project.optional-dependencies] group to install
+  #   WORKER -> which [project.scripts] console script to run as the container's cmd
+  # Adding a worker = a tau/workers/<name>.py with main(), a [project.scripts]
+  # line, the extra filled in, and a service copied from the block below.
+  chain-watcher:
+    build:
+      context: .
+      dockerfile: deploy/worker/Dockerfile
+      args:
+        EXTRA: bittensor
+        WORKER: chain-watcher
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB}
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    restart: unless-stopped
+
+  judge:
+    build:
+      context: .
+      dockerfile: deploy/worker/Dockerfile
+      args:
+        EXTRA: judge          # [project.optional-dependencies] group (empty; deps are core)
+        WORKER: judge-worker  # [project.scripts] console script to run
+    container_name: pg_stack_judge
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB}
+    depends_on:
+      db:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    restart: unless-stopped
+
+  # Sole writer of challenges/kings -- run exactly one (do not scale).
+  duel-resolver:
+    build:
+      context: .
+      dockerfile: deploy/worker/Dockerfile
+      args:
+        EXTRA: duel-resolver   # [project.optional-dependencies] group (empty; deps are core)
+        WORKER: duel-resolver  # [project.scripts] console script to run
+    container_name: pg_stack_duel_resolver
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB}
+    depends_on:
+      db:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    restart: unless-stopped
+
+  # Sole setter of on-chain weights -- run exactly one (do not scale). Reads the king
+  # window from the DB and submits set_weights once per epoch, near the boundary.
+  weight-setter:
+    build:
+      context: .
+      dockerfile: deploy/worker/Dockerfile
+      args:
+        EXTRA: weight-setter   # [project.optional-dependencies] group (empty; deps are core)
+        WORKER: weight-setter  # [project.scripts] console script to run
+    container_name: pg_stack_weight_setter
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB}
+      BITTENSOR_WALLET_PATH: /wallets
+    volumes:
+      # The wallet's hotkey signs the set_weights extrinsic (read-only mount).
+      - ${HOST_BITTENSOR_WALLETS:-${HOME}/.bittensor/wallets}:/wallets:ro
+    depends_on:
+      db:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    restart: unless-stopped
+
+volumes:
+  pgdata:
+    driver: local

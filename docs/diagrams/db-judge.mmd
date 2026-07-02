@@ -1,0 +1,20 @@
+%%{init: {"theme": "base", "themeVariables": {"fontSize": "15px"}}}%%
+flowchart LR
+    jd(["judge"])
+    tasks[("tasks")]
+    kings[("kings")]
+    chal[("challenges")]
+    tsol[("task_solutions")]
+    judg[("judgements")]
+
+    jd -. "R  QUALIFIED tasks" .-> tasks
+    jd -. "R  reigning king" .-> kings
+    jd -. "R  active challenges" .-> chal
+    jd -. "R  king &amp; challenger solutions" .-> tsol
+    jd -. "R  pairs with no verdict yet" .-> judg
+    jd == "W  INSERT llm_winner, king_score,<br/>challenger_score, error?<br/>ON CONFLICT DO NOTHING" ==> judg
+
+    classDef worker fill:#2563eb,stroke:#1e3a8a,color:#fff;
+    classDef store fill:#f59e0b,stroke:#b45309,color:#111;
+    class jd worker;
+    class tasks,kings,chal,tsol,judg store;

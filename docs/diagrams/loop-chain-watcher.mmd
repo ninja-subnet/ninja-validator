@@ -1,0 +1,19 @@
+%%{init: {"theme": "base", "themeVariables": {"fontSize": "15px"}}}%%
+flowchart TB
+    start(["chain-watcher.main()"]) --> head["Poll chain tip:<br/>source.head() → block, timestamp"]
+    head --> adv{"block advanced<br/>past last_block?"}
+    adv -- no --> sleep["sleep POLL_INTERVAL_SECONDS<br/>(default 6s)"]
+    adv -- yes --> meta["Fetch metagraph<br/>at head.block (lite node)"]
+    meta --> diff["Diff uids vs latest recorded<br/>(hot/cold key changed?)"]
+    diff --> any{"any changed<br/>uids?"}
+    any -- no --> upd["last_block = head.block"]
+    any -- yes --> resolve["Resolve each new uid's<br/>registration block_date<br/>(archive node, memoized)"]
+    resolve --> write["INSERT INTO registrations<br/>ON CONFLICT (uid, block) DO NOTHING"]
+    write --> upd
+    upd --> sleep
+    sleep --> head
+
+    err["exception → log, retry next tick"]
+    head -.-> err
+    meta -.-> err
+    err -.-> sleep

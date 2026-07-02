@@ -1,111 +1,57 @@
 [project]
-name = "swe-eval"
+name = "tau"
 version = "0.1.0"
-description = "Simple commit-mining and Cursor evaluation pipeline"
-requires-python = ">=3.11"
-dependencies = [
-    "bittensor>=10.2.0",
-    "boto3>=1.35.0",
-    "datasets>=3.0.0",
-    "huggingface_hub>=0.36.0",
-    "httpx>=0.28.0",
-    "pyflakes>=3.2.0",
+description = "Validator middleware and workers (db seam, chain watcher, judge)."
+authors = [
+    { name = "jan-Inasi", email = "ignacymajkusiak@gmail.com" }
 ]
+requires-python = ">=3.12"
+dependencies = [
+    "axiom-py>=0.12.0",
+    "bittensor>=9.0",
+    "docker>=7.1",
+    "httpx>=0.28.1",
+    "psycopg[binary]==3.2.9",
+    # [asyncio] pulls greenlet, required by SQLAlchemy's async engine (GeneratorDb).
+    "sqlalchemy[asyncio]==2.0.41",
+]
+
+[project.optional-dependencies]
+# Alembic runs only in the migration image (deploy/migrate), not the workers.
+migrate = ["alembic==1.16.1"]
+# Empty per-worker placeholders: all worker deps are core, but each EXTRA build-arg
+# (deploy/worker/Dockerfile) still needs a matching extra to resolve.
+bittensor = []
+judge = []
+task-generator = []
+duel-resolver = []
+qualification = []
+weight-setter = []
+task-solver = []
 
 [project.scripts]
-tau = "tau_entrypoint:main"
+# Worker entrypoints: each maps to tau.workers.<name>:main. The deploy/worker
+# image runs one of these via its WORKER build-arg. The modules land later.
+chain-watcher = "tau.workers.chain_watcher:main"
+judge-worker = "tau.workers.judge:main"
+task-generator = "tau.workers.task_generator:main"
+qualification-worker = "tau.workers.qualification:main"
+duel-resolver = "tau.workers.duel_resolver:main"
+task-solver = "tau.workers.task_solver:main"
+weight-setter = "tau.workers.weight_setter:main"
 
 [build-system]
-requires = ["setuptools>=69"]
-build-backend = "setuptools.build_meta"
-
-[tool.setuptools]
-packages = [
-    "tau",
-    "tau.bittensor",
-    "tau.io",
-    "tau.rollouts",
-]
-py-modules = [
-    "claude_runner",
-    "claw_runner",
-    "cli",
-    "compare",
-    "config",
-    "cursor_runner",
-    "docker_solver",
-    "eval",
-    "fast_crown_eval",
-    "benchmarks",
-    "github_miner",
-    "openrouter_client",
-    "openrouter_proxy",
-    "pipeline",
-    "diff_judge_logging",
-    "private_submission",
-    "validator_state_io",
-    "r2",
-    "solver_runner",
-    "submission_api",
-    "swebench_crown_benchmark",
-    "terminal_bench_crown_benchmark",
-    "terminal_bench_mini_swe_agent",
-    "terminal_bench_tau_agent",
-    "task_generation",
-    "task_only_hf_export",
-    "task_pool_manager",
-    "tau_entrypoint",
-    "validate",
-    "workspace",
-]
-
-[tool.setuptools.package-dir]
-"" = "src"
-
-[tool.ruff]
-target-version = "py311"
-line-length = 100
-src = ["src"]
-
-[tool.ruff.lint]
-select = ["E", "F", "W", "I", "UP"]
-ignore = ["E501"]
-
-[tool.ruff.lint.isort]
-known-first-party = [
-    "claude_runner",
-    "claw_runner",
-    "cli",
-    "compare",
-    "config",
-    "cursor_runner",
-    "docker_solver",
-    "eval",
-    "fast_crown_eval",
-    "benchmarks",
-    "github_miner",
-    "openrouter_client",
-    "openrouter_proxy",
-    "pipeline",
-    "diff_judge_logging",
-    "private_submission",
-    "validator_state_io",
-    "r2",
-    "solver_runner",
-    "submission_api",
-    "swebench_crown_benchmark",
-    "terminal_bench_crown_benchmark",
-    "terminal_bench_mini_swe_agent",
-    "terminal_bench_tau_agent",
-    "task_generation",
-    "task_pool_manager",
-    "tau_entrypoint",
-    "validate",
-    "workspace",
-]
+requires = ["uv_build>=0.11.3,<0.12.0"]
+build-backend = "uv_build"
 
 [dependency-groups]
 dev = [
-    "pyright>=1.1.410",
-    "pytest>=9.0.3",
+    "pytest>=9.1.0",
+    "pytest-asyncio>=0.24.0",
+    "python-dotenv>=1.2.2",
 ]
+
+[tool.pytest.ini_options]
+# Treat `async def test_*` as coroutines automatically (no per-test marker).
+# Plain sync tests that call asyncio.run(...) are unaffected.
+asyncio_mode = "auto"

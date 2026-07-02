@@ -1,0 +1,19 @@
+%%{init: {"theme": "base", "themeVariables": {"fontSize": "15px"}}}%%
+flowchart LR
+    ts(["task-solver"])
+    kings[("kings")]
+    tasks[("tasks")]
+    chal[("challenges")]
+    tsol[("task_solutions")]
+
+    ts -. "R  reigning king" .-> kings
+    ts -. "R  CANDIDATE tasks (qualify) +<br/>QUALIFIED tasks (solve)" .-> tasks
+    ts -. "R  active challenges (status 1/2)" .-> chal
+    ts -. "R  which (task, challenger)<br/>have no solution yet" .-> tsol
+    ts == "W  UPDATE status_id =<br/>QUALIFIED (1) / DISQUALIFIED (2)" ==> tasks
+    ts == "W  INSERT solution, duration, exit_reason<br/>(king on qualify · challenger on solve)" ==> tsol
+
+    classDef worker fill:#2563eb,stroke:#1e3a8a,color:#fff;
+    classDef store fill:#f59e0b,stroke:#b45309,color:#111;
+    class ts worker;
+    class kings,tasks,chal,tsol store;

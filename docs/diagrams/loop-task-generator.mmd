@@ -1,0 +1,20 @@
+%%{init: {"theme": "base", "themeVariables": {"fontSize": "15px"}}}%%
+flowchart TB
+    start(["task-generator.main()"]) --> king["Read reigning king<br/>(kings ORDER BY king_from DESC)"]
+    king --> hasking{"king reigns?"}
+    hasking -- no --> idle["sleep TAU_GENERATOR_POLL_SECONDS<br/>(default 30s)"]
+    idle --> king
+    hasking -- yes --> deficit["Per pool: deficit =<br/>target − count(status != DISQUALIFIED)<br/>targets = TAU_POOL_ONE/TWO_TARGET (50)"]
+    deficit --> queue["Sync work queue to deficits<br/>(launch / cancel fetch requests)"]
+
+    queue --> fetch["Fetcher: sampler.sample_commit()<br/>GitHub search + firehose,<br/>rotate GITHUB_TOKENS, quality gates"]
+    fetch --> fp{"fingerprint<br/>already a task?"}
+    fp -- yes --> fetch
+    fp -- no --> enq["queue commit for description"]
+
+    enq --> describe["Describer pool (concurrency N):<br/>LLM describe, up to<br/>TAU_GENERATOR_LLM_ATTEMPTS tries"]
+    describe --> ok{"valid task<br/>description?"}
+    ok -- yes --> insert["INSERT tasks<br/>status_id = CANDIDATE (0), pool_type<br/>ON CONFLICT (fingerprint) DO NOTHING"]
+    ok -- no --> failrow["INSERT task_generation_failures<br/>(append-only log)"]
+    insert --> queue
+    failrow --> fetch

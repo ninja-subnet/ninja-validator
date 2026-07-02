@@ -1,0 +1,20 @@
+%%{init: {"theme": "base", "themeVariables": {"fontSize": "15px"}}}%%
+flowchart TB
+    start(["judge.main()"]) --> pending["Query pending pairs:<br/>QUALIFIED tasks in active challenges,<br/>king &amp; challenger solutions present,<br/>no judgements row yet"]
+    pending --> cancel["Cancel in-flight judgements<br/>no longer pending (king changed,<br/>challenge ended, task disqualified)"]
+    cancel --> spawn["Spawn new judgements up to<br/>TAU_JUDGE_CONCURRENCY (5)"]
+
+    spawn --> blind["Blind: seed-hash swap of<br/>king/challenger → candidate_a / candidate_b"]
+    blind --> safety{"prompt-injection<br/>detected in a patch?"}
+    safety -- yes --> forced["Forced verdict<br/>(clean patch wins / both → tie)"]
+    safety -- no --> llm["LLM compare, up to TAU_JUDGE_ATTEMPTS<br/>across model fallbacks,<br/>bounded by TAU_JUDGE_TOTAL_TIMEOUT"]
+
+    llm --> got{"got a<br/>verdict?"}
+    got -- yes --> unblind["Unblind → king_score,<br/>challenger_score, llm_winner"]
+    got -- no --> neutral["Neutral fallback:<br/>0.5 / 0.5, error set"]
+
+    unblind --> save["INSERT judgements<br/>ON CONFLICT DO NOTHING"]
+    neutral --> save
+    forced --> save
+    save --> sleep["sleep TAU_JUDGE_POLL_SECONDS (10s)"]
+    sleep --> pending
