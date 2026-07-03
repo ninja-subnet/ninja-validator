@@ -220,7 +220,12 @@ def _prepare_workdir(req: AgentRunRequest) -> Path:
     work_root = Path(os.environ.get("TAU_SANDBOX_WORK_ROOT") or tempfile.gettempdir())
     work_root.mkdir(parents=True, exist_ok=True)
     workdir = Path(tempfile.mkdtemp(prefix="tau-sbx-", dir=work_root))
-    shutil.copytree(req.repo_dir, workdir / "repo")
+    shutil.copytree(
+        req.repo_dir,
+        workdir / "repo",
+        symlinks=True,
+        ignore_dangling_symlinks=True,
+    )
     shutil.copytree(req.agent_dir, workdir / "agent")  # bundle root (agent.py + agent/)
     (workdir / "task.txt").write_text(req.problem_statement, encoding="utf-8")
     (workdir / "harness.py").write_text(HARNESS_SCRIPT, encoding="utf-8")

@@ -76,6 +76,33 @@ def test_prepare_workdir_lays_out_bundle(tmp_path: Path) -> None:
         shutil.rmtree(workdir, ignore_errors=True)
 
 
+def test_prepare_workdir_preserves_repo_symlinks(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "target.py").write_text("VALUE = 1\n")
+    (repo / "linked.py").symlink_to("target.py")
+    (repo / "dangling.py").symlink_to("missing.py")
+
+    bundle = tmp_path / "submission"
+    bundle.mkdir()
+    (bundle / "agent.py").write_text("def solve(**kw):\n    return {'success': True}\n")
+    req = AgentRunRequest(
+        task_id="t1", problem_statement="fix the bug", repo_dir=repo, agent_dir=bundle
+    )
+
+    workdir = _prepare_workdir(req)
+    try:
+        copied_link = workdir / "repo" / "linked.py"
+        copied_dangling = workdir / "repo" / "dangling.py"
+
+        assert copied_link.is_symlink()
+        assert copied_link.readlink() == Path("target.py")
+        assert copied_dangling.is_symlink()
+        assert copied_dangling.readlink() == Path("missing.py")
+    finally:
+        shutil.rmtree(workdir, ignore_errors=True)
+
+
 def test_harness_script_is_valid_python() -> None:
     compile(HARNESS_SCRIPT, "harness.py", "exec")
 
