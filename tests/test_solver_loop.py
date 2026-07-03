@@ -25,12 +25,16 @@ from tau.workers.task_solver import loop as loop_mod
 
 
 class _FakeDb:
-    def __init__(self) -> None:
+    def __init__(self, *, finish_saved: bool = True) -> None:
         self.qualifications: list[dict] = []
         self.solutions: list[dict] = []
+        self.finish_saved = finish_saved
 
-    def finish_qualification(self, **kw) -> None:
+    def finish_qualification(self, **kw) -> bool:
+        if not self.finish_saved:
+            return False
         self.qualifications.append(kw)
+        return True
 
     def save_task_solution(self, **kw) -> None:
         self.solutions.append(kw)
@@ -100,6 +104,13 @@ def test_qualification_agent_error_disqualifies(monkeypatch) -> None:
     db, cfg = _FakeDb(), _config()
     _qualify(db, cfg)
     assert db.qualifications[0]["qualified"] is False
+
+
+def test_qualification_discards_result_when_already_finished(monkeypatch) -> None:
+    _stub_run(monkeypatch, _result(EXIT_COMPLETED, success=True, diff="+added\n-removed"))
+    db, cfg = _FakeDb(finish_saved=False), _config()
+    _qualify(db, cfg)
+    assert db.qualifications == []
 
 
 # -- challenger --------------------------------------------------------------

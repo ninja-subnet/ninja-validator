@@ -11,8 +11,10 @@ docker/git work — async would buy nothing. Two reads drive the worker's two ph
 
 Each job carries the *submission_id* whose agent should run; the worker resolves the
 actual agent files from the local submissions directory (folder == submission id).
-Writes (``finish_qualification`` / ``save_task_solution``) are idempotent via
-``ON CONFLICT``. It deliberately avoids the ``tau.bittensor`` imports that gate the
+Writes (``finish_qualification`` / ``save_task_solution``) are safe across
+replicas: qualification finish is guarded on ``CANDIDATE`` (first transition wins),
+and solution rows use ``ON CONFLICT DO NOTHING``. It deliberately avoids the
+``tau.bittensor`` imports that gate the
 full ``database.py``, so it can ship independently.
 """
 
@@ -111,20 +113,27 @@ class SolverDb:
         solution: str,
         duration: float,
         exit_reason: str,
-    ) -> None:
+    ) -> bool:
         """Flip a CANDIDATE task to QUALIFIED/DISQUALIFIED; store the king solution on pass.
 
-        One transaction. On QUALIFIED the king's ``task_solutions`` row is inserted
-        (``ON CONFLICT DO NOTHING``) so a duel/judge has the king side; on
-        DISQUALIFIED only the status changes.
+        One transaction. Returns False if the task is no longer ``CANDIDATE`` (another
+        replica or an earlier finish won the race). On QUALIFIED the king's
+        ``task_solutions`` row is inserted (``ON CONFLICT DO NOTHING``) so a duel/judge
+        has the king side; on DISQUALIFIED only the status changes.
         """
         status = TaskStatus.QUALIFIED if qualified else TaskStatus.DISQUALIFIED
         with session_scope(self._sessions) as session:
-            session.execute(
+            updated = session.execute(
                 update(models.Task)
-                .where(models.Task.task_id == task_id)
+                .where(
+                    models.Task.task_id == task_id,
+                    models.Task.status_id == int(TaskStatus.CANDIDATE),
+                )
                 .values(status_id=int(status))
+                .returning(models.Task.task_id)
             )
+            if updated.first() is None:
+                return False
             if qualified:
                 session.execute(
                     insert(models.TaskSolution)
@@ -137,6 +146,7 @@ class SolverDb:
                     )
                     .on_conflict_do_nothing(index_elements=["task_id", "submission_id"])
                 )
+            return True
 
     # -- phase B: challenger solve -------------------------------------------
     def next_challenger_jobs(self, limit: int) -> list[SolveJob]:

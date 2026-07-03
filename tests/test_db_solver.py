@@ -163,7 +163,7 @@ def test_finish_qualification_qualified_sets_status_and_stores_solution(db: Solv
         _task(s, "t1", "king-1", pool_type=1, status_id=int(TaskStatus.CANDIDATE), fp="f1")
 
     _seed(db, seed)
-    db.finish_qualification(
+    assert db.finish_qualification(
         task_id="t1", king_submission_id="king-1", qualified=True,
         solution="diff --git a/x b/x", duration=1.2, exit_reason="completed",
     )
@@ -181,7 +181,7 @@ def test_finish_qualification_disqualified_sets_status_no_solution(db: SolverDb)
         _task(s, "t1", "king-1", pool_type=1, status_id=int(TaskStatus.CANDIDATE), fp="f1")
 
     _seed(db, seed)
-    db.finish_qualification(
+    assert db.finish_qualification(
         task_id="t1", king_submission_id="king-1", qualified=False,
         solution="", duration=0.5, exit_reason="time_limit_exceeded",
     )
@@ -189,6 +189,69 @@ def test_finish_qualification_disqualified_sets_status_no_solution(db: SolverDb)
         assert session.get(Task, "t1").status_id == int(TaskStatus.DISQUALIFIED)
         rows = session.scalars(select(TaskSolution)).all()
         assert rows == []
+
+
+def test_finish_qualification_rejects_non_candidate_status(db: SolverDb) -> None:
+    def seed(s):  # noqa: ANN001
+        _submission(s, "king-1")
+        _king(s, "king-1")
+        _task(s, "t1", "king-1", pool_type=1, status_id=int(TaskStatus.QUALIFIED), fp="f1")
+
+    _seed(db, seed)
+    saved = db.finish_qualification(
+        task_id="t1", king_submission_id="king-1", qualified=False,
+        solution="", duration=0.5, exit_reason="time_limit_exceeded",
+    )
+    assert saved is False
+    with session_scope(session_factory(db._engine)) as session:  # noqa: SLF001
+        assert session.get(Task, "t1").status_id == int(TaskStatus.QUALIFIED)
+        assert session.scalars(select(TaskSolution)).all() == []
+
+
+def test_finish_qualification_second_finisher_loses_race(db: SolverDb) -> None:
+    def seed(s):  # noqa: ANN001
+        _submission(s, "king-1")
+        _king(s, "king-1")
+        _task(s, "t1", "king-1", pool_type=1, status_id=int(TaskStatus.CANDIDATE), fp="f1")
+
+    _seed(db, seed)
+    assert db.finish_qualification(
+        task_id="t1", king_submission_id="king-1", qualified=True,
+        solution="diff --git a/x b/x", duration=1.2, exit_reason="completed",
+    )
+    saved = db.finish_qualification(
+        task_id="t1", king_submission_id="king-1", qualified=False,
+        solution="", duration=0.5, exit_reason="time_limit_exceeded",
+    )
+    assert saved is False
+    with session_scope(session_factory(db._engine)) as session:  # noqa: SLF001
+        task = session.get(Task, "t1")
+        assert task.status_id == int(TaskStatus.QUALIFIED)
+        sol = session.get(TaskSolution, {"task_id": "t1", "submission_id": "king-1"})
+        assert sol is not None and sol.solution.startswith("diff")
+
+
+def test_finish_qualification_disqualify_then_qualify_keeps_disqualified(
+    db: SolverDb,
+) -> None:
+    def seed(s):  # noqa: ANN001
+        _submission(s, "king-1")
+        _king(s, "king-1")
+        _task(s, "t1", "king-1", pool_type=1, status_id=int(TaskStatus.CANDIDATE), fp="f1")
+
+    _seed(db, seed)
+    assert db.finish_qualification(
+        task_id="t1", king_submission_id="king-1", qualified=False,
+        solution="", duration=0.5, exit_reason="time_limit_exceeded",
+    )
+    saved = db.finish_qualification(
+        task_id="t1", king_submission_id="king-1", qualified=True,
+        solution="diff --git a/x b/x", duration=1.2, exit_reason="completed",
+    )
+    assert saved is False
+    with session_scope(session_factory(db._engine)) as session:  # noqa: SLF001
+        assert session.get(Task, "t1").status_id == int(TaskStatus.DISQUALIFIED)
+        assert session.scalars(select(TaskSolution)).all() == []
 
 
 # -- phase B: challenger solve -----------------------------------------------------

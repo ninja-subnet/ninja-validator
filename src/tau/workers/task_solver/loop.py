@@ -237,14 +237,20 @@ def _qualify(
     qualified = result.success and _changed_lines(result.solution_diff) >= (
         config.qualify_min_changed_lines
     )
-    db.finish_qualification(
+    if not db.finish_qualification(
         task_id=job.task_id,
         king_submission_id=job.submission_id,
         qualified=qualified,
         solution=result.solution_diff,
         duration=result.elapsed_seconds,
         exit_reason=result.exit_reason,
-    )
+    ):
+        log.info(
+            "qualification task=%s king=%s already finished elsewhere — discarding result",
+            job.task_id,
+            job.submission_id,
+        )
+        return
     log.info(
         "qualified task=%s king=%s -> %s (exit=%s, %d changed lines)",
         job.task_id,
