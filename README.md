@@ -538,8 +538,11 @@ authoritative, commented list). Grouped by concern:
 | `OPENROUTER_API_KEY` | — | Key for the task-generator + judge (and default solver proxy upstream). Required unless both dummy modes are on. |
 | `LLM_PROVIDER` | `openrouter` | Solver proxy upstream: `openrouter` \| `ninja` \| `custom`. |
 | `OPENROUTER_UPSTREAM_BASE_URL` | provider default | Override OpenRouter endpoint. |
+| `OPENROUTER_UPSTREAM_BASE_URLS` | — | Optional comma-separated solver proxy endpoints; requests are round-robined. |
 | `NINJA_INFERENCE_BASE_URL` / `NINJA_INFERENCE_API_KEY` | — | Used when `LLM_PROVIDER=ninja`. |
+| `NINJA_INFERENCE_BASE_URLS` | — | Optional comma-separated local inference endpoints, e.g. `http://IP:8000/v1,http://IP:8001/v1`. |
 | `LLM_UPSTREAM_BASE_URL` / `LLM_UPSTREAM_API_KEY` | — | Used when `LLM_PROVIDER=custom` (any OpenAI-compatible endpoint). |
+| `LLM_UPSTREAM_BASE_URLS` | — | Optional comma-separated custom endpoints, e.g. `http://IP:8000/v1,http://IP:8001/v1`. |
 
 ### task-generator tuning
 

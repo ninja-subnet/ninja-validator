@@ -146,6 +146,7 @@ class LLMProxy:
     _thread: threading.Thread | None = field(default=None, init=False, repr=False)
     _unix_thread: threading.Thread | None = field(default=None, init=False, repr=False)
     _lock: threading.Lock = field(default_factory=threading.Lock, init=False, repr=False)
+    _upstream_index: int = field(default=0, init=False, repr=False)
     _usage: SolveUsageSummary = field(default_factory=SolveUsageSummary, init=False, repr=False)
     _upstream_client: UpstreamClient = field(init=False, repr=False)
 
@@ -213,7 +214,14 @@ class LLMProxy:
             self._server = _ReusableThreadingHTTPServer((self.bind_host, self.bind_port), Handler)
             self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
             self._thread.start()
-            log.debug("LLM proxy listening on %s:%s -> %s", self.host, self.port, self.upstream.name)
+            log.debug(
+                "LLM proxy listening on %s:%s -> %s (%d endpoint%s)",
+                self.host,
+                self.port,
+                self.upstream.name,
+                self.upstream.endpoint_count,
+                "" if self.upstream.endpoint_count == 1 else "s",
+            )
 
         if self.unix_socket_path:
             socket_dir = os.path.dirname(self.unix_socket_path)
@@ -376,9 +384,10 @@ class LLMProxy:
         start = time.monotonic()
 
         try:
+            upstream_base_url = self._next_upstream_base_url()
             upstream = self._upstream_client.fetch(
                 command=handler.command,
-                url=f"{self.upstream.base_url}{handler.path}",
+                url=f"{upstream_base_url}{handler.path}",
                 headers=self._build_upstream_headers(handler),
                 body=body,
                 prepared_payload=prepared_payload,
@@ -467,6 +476,13 @@ class LLMProxy:
         handler.wfile.write(upstream.body)
         handler.wfile.flush()
         handler.close_connection = True
+
+    def _next_upstream_base_url(self) -> str:
+        with self._lock:
+            index = self._upstream_index % self.upstream.endpoint_count
+            base_url = self.upstream.base_urls[index]
+            self._upstream_index += 1
+            return base_url
 
     @staticmethod
     def _send_raw(

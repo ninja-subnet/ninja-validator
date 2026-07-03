@@ -4,7 +4,8 @@ Lets untrusted sandboxed agent code reach a model without ever seeing the upstre
 key or the public internet: ``LLMProxy`` injects the real key, enforces the model /
 provider / sampling params, caps spend with a ``SolveBudget``, and authenticates the
 agent with a per-solve token. The upstream (OpenRouter, our own ``ninja`` backend, or
-a custom endpoint) is chosen by ``UpstreamTarget.from_env`` via ``LLM_PROVIDER``.
+custom OpenAI-compatible endpoint URLs) is chosen by ``UpstreamTarget.from_env`` via
+``LLM_PROVIDER``.
 
     from tau.proxy import LLMProxy, SolveBudget, UpstreamTarget
 

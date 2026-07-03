@@ -83,6 +83,49 @@ def test_injects_upstream_key_and_enforces_model(proxy_with_model) -> None:
     assert call["payload"]["temperature"] == 0.0
 
 
+def test_custom_upstream_from_env_accepts_multiple_base_urls() -> None:
+    upstream = UpstreamTarget.from_env(
+        {
+            "LLM_PROVIDER": "custom",
+            "LLM_UPSTREAM_BASE_URLS": (
+                "http://10.0.0.5:8000/v1, http://10.0.0.5:8001/v1"
+            ),
+            "LLM_UPSTREAM_API_KEY": "LOCAL-KEY",
+        }
+    )
+    assert upstream.base_url == "http://10.0.0.5:8000"
+    assert upstream.base_urls == ("http://10.0.0.5:8000", "http://10.0.0.5:8001")
+    assert upstream.endpoint_count == 2
+
+
+def test_proxy_round_robins_multiple_upstream_urls() -> None:
+    fake = FakeUpstream()
+    upstream = UpstreamTarget(
+        name="test",
+        base_url="http://10.0.0.5:8000/v1",
+        base_urls=("http://10.0.0.5:8000/v1", "http://10.0.0.5:8001/v1"),
+        api_key="UPSTREAM-KEY",
+    )
+    proxy = LLMProxy(
+        upstream, bind_host="127.0.0.1", bind_port=0, enforced_model="enforced/model"
+    )
+    gen = _running(proxy, fake)
+    proxy = next(gen)
+    try:
+        first = _post(proxy, proxy.auth_token, _BODY)
+        second = _post(proxy, proxy.auth_token, _BODY)
+        assert first.status_code == 200
+        assert second.status_code == 200
+        assert fake.calls[0]["url"].startswith(
+            "http://10.0.0.5:8000/v1/chat/completions"
+        )
+        assert fake.calls[1]["url"].startswith(
+            "http://10.0.0.5:8001/v1/chat/completions"
+        )
+    finally:
+        next(gen, None)
+
+
 def test_rejects_request_without_auth(proxy_with_model) -> None:
     proxy, fake = proxy_with_model
     resp = _post(proxy, None, _BODY)
