@@ -5,17 +5,30 @@ and budget caps. Runs a real proxy on 127.0.0.1 with a fake upstream (no network
 from __future__ import annotations
 
 import json
+import time
 from collections.abc import Iterator
 
 import httpx
 import pytest
 
 from tau.proxy import REQUEST_LIMIT_EXIT_REASON, LLMProxy, SolveBudget, UpstreamTarget
-from tau.proxy.upstream import UpstreamClient, UpstreamResponse
+from tau.proxy.upstream import HttpxUpstreamClient, UpstreamClient, UpstreamResponse
 from tau.sandbox.config import SandboxConfig
 
 _UPSTREAM = UpstreamTarget(name="test", base_url="http://upstream.invalid", api_key="UPSTREAM-KEY")
 _BODY = {"model": "miner/model", "messages": [{"role": "user", "content": "hi"}], "top_k": 50}
+_TOOLS = [
+    {
+        "type": "function",
+        "function": {
+            "name": "bash",
+            "parameters": {
+                "type": "object",
+                "properties": {"command": {"type": "string"}},
+            },
+        },
+    }
+]
 
 
 class FakeUpstream(UpstreamClient):
@@ -71,7 +84,7 @@ def _post(proxy: LLMProxy, token: str | None, body: dict) -> httpx.Response:
 
 def test_injects_upstream_key_and_enforces_model(proxy_with_model) -> None:
     proxy, fake = proxy_with_model
-    resp = _post(proxy, proxy.auth_token, _BODY)
+    resp = _post(proxy, proxy.auth_token, {**_BODY, "tools": _TOOLS})
     assert resp.status_code == 200
     call = fake.calls[-1]
     # The proxy injected the upstream key, never exposing it to the caller.
@@ -82,6 +95,7 @@ def test_injects_upstream_key_and_enforces_model(proxy_with_model) -> None:
     assert call["payload"]["model"] == "enforced/model"
     assert "top_k" not in call["payload"]
     assert call["payload"]["temperature"] == 0.0
+    assert call["payload"]["tools"] == _TOOLS
 
 
 def test_custom_upstream_from_env_accepts_multiple_base_urls() -> None:
@@ -247,3 +261,107 @@ def test_status_timeout_classification(status: int, is_timeout: bool) -> None:
 def test_read_timeout_is_configurable() -> None:
     proxy = LLMProxy(_UPSTREAM, upstream_read_timeout_seconds=123.0)
     assert proxy._upstream_client._timeout.read == 123.0  # noqa: SLF001
+
+
+class _SSEStreamResponse:
+    status_code = 200
+    headers = httpx.Headers({"Content-Type": "text/event-stream"})
+
+    def __init__(self, chunks: list[dict]) -> None:
+        self.chunks = chunks
+
+    def __enter__(self):  # noqa: ANN204
+        return self
+
+    def __exit__(self, *args) -> None:  # noqa: ANN002
+        return None
+
+    def iter_lines(self) -> Iterator[str]:
+        for chunk in self.chunks:
+            yield f"data: {json.dumps(chunk)}"
+        yield "data: [DONE]"
+
+
+class _SSEClient:
+    def __init__(self, chunks: list[dict]) -> None:
+        self.chunks = chunks
+        self.payload: dict | None = None
+
+    def stream(self, method, url, headers, json):  # noqa: ANN001, ANN201
+        self.payload = json
+        return _SSEStreamResponse(self.chunks)
+
+
+def test_streamed_chat_reassembly_preserves_tools_and_tool_calls() -> None:
+    chunks = [
+        {
+            "id": "chatcmpl-1",
+            "created": 123,
+            "model": "enforced/model",
+            "choices": [
+                {
+                    "index": 0,
+                    "delta": {
+                        "role": "assistant",
+                        "tool_calls": [
+                            {
+                                "index": 0,
+                                "id": "call_1",
+                                "type": "function",
+                                "function": {
+                                    "name": "bash",
+                                    "arguments": '{"command":"',
+                                },
+                            }
+                        ],
+                    },
+                    "finish_reason": None,
+                }
+            ],
+        },
+        {
+            "id": "chatcmpl-1",
+            "model": "enforced/model",
+            "choices": [
+                {
+                    "index": 0,
+                    "delta": {
+                        "tool_calls": [
+                            {"index": 0, "function": {"arguments": "pwd\"}"}}
+                        ]
+                    },
+                    "finish_reason": "tool_calls",
+                }
+            ],
+        },
+        {
+            "id": "chatcmpl-1",
+            "model": "enforced/model",
+            "choices": [],
+            "usage": {"prompt_tokens": 11, "completion_tokens": 7, "total_tokens": 18},
+        },
+    ]
+    fake_client = _SSEClient(chunks)
+    upstream = HttpxUpstreamClient()._fetch_streamed(  # noqa: SLF001
+        client=fake_client,
+        url="http://upstream.invalid/v1/chat/completions",
+        headers={},
+        payload={
+            "model": "enforced/model",
+            "messages": [{"role": "user", "content": "hi"}],
+            "tools": _TOOLS,
+        },
+        start=time.monotonic(),
+    )
+
+    assert fake_client.payload is not None
+    assert fake_client.payload["tools"] == _TOOLS
+    message = upstream.payload["choices"][0]["message"]
+    assert message["tool_calls"] == [
+        {
+            "id": "call_1",
+            "type": "function",
+            "function": {"name": "bash", "arguments": '{"command":"pwd"}'},
+        }
+    ]
+    assert upstream.payload["choices"][0]["finish_reason"] == "tool_calls"

@@ -110,6 +110,7 @@ class HttpxUpstreamClient(UpstreamClient):
 
         content_parts: list[str] = []
         reasoning_parts: list[str] = []
+        tool_calls: dict[int, dict[str, Any]] = {}
         role = "assistant"
         response_id: str | None = None
         response_model: str | None = None
@@ -177,7 +178,9 @@ class HttpxUpstreamClient(UpstreamClient):
                     if isinstance(reasoning, str) and reasoning:
                         reasoning_parts.append(reasoning)
                         token_seen = True
-                    if delta.get("tool_calls") or message.get("tool_calls"):
+                    incoming_tool_calls = delta.get("tool_calls") or message.get("tool_calls")
+                    if incoming_tool_calls:
+                        _merge_tool_calls(tool_calls, incoming_tool_calls)
                         token_seen = True
                     if token_seen and first_token_latency_ms is None:
                         first_token_latency_ms = int((time.monotonic() - start) * 1000)
@@ -188,6 +191,12 @@ class HttpxUpstreamClient(UpstreamClient):
                         choice.get("native_finish_reason") or native_finish_reason
                     )
 
+        built_message: dict[str, Any] = {"role": role, "content": "".join(content_parts)}
+        if tool_calls:
+            built_message["tool_calls"] = [
+                tool_calls[index] for index in sorted(tool_calls)
+            ]
+
         built_payload: dict[str, Any] = {
             "id": response_id or f"chatcmpl-proxy-{int(time.time() * 1000)}",
             "object": "chat.completion",
@@ -196,7 +205,7 @@ class HttpxUpstreamClient(UpstreamClient):
             "choices": [
                 {
                     "index": 0,
-                    "message": {"role": role, "content": "".join(content_parts)},
+                    "message": built_message,
                     "finish_reason": finish_reason,
                 },
             ],
@@ -214,6 +223,38 @@ class HttpxUpstreamClient(UpstreamClient):
             headers=httpx.Headers({"Content-Type": "application/json"}),
             first_token_latency_ms=first_token_latency_ms,
         )
+
+
+def _merge_tool_calls(accumulator: dict[int, dict[str, Any]], incoming: Any) -> None:
+    """Assemble OpenAI-style streamed tool call deltas by index."""
+    if not isinstance(incoming, list):
+        return
+    for fallback_index, item in enumerate(incoming):
+        if not isinstance(item, dict):
+            continue
+        index = item.get("index")
+        if not isinstance(index, int):
+            index = fallback_index
+        current = accumulator.setdefault(index, {})
+        for key, value in item.items():
+            if key == "index":
+                continue
+            if key == "function" and isinstance(value, dict):
+                function = current.setdefault("function", {})
+                if not isinstance(function, dict):
+                    function = {}
+                    current["function"] = function
+                _merge_tool_call_function(function, value)
+            elif value is not None:
+                current[key] = value
+
+
+def _merge_tool_call_function(current: dict[str, Any], incoming: dict[str, Any]) -> None:
+    for key, value in incoming.items():
+        if key == "arguments" and isinstance(value, str) and isinstance(current.get(key), str):
+            current[key] += value
+        elif value is not None:
+            current[key] = value
 
 
 class CachedUpstreamClient(UpstreamClient):
