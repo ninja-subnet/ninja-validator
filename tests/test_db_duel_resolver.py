@@ -205,8 +205,8 @@ def _judgement(
     king_score: float | None = None,
     challenger_score: float | None = None,
 ) -> None:
-    # Judgement has a composite FK to task_solutions but no relationship(), so its
-    # solutions must already be flushed (callers flush first).
+    # Keep solution rows available for old-path compatibility; the resolver itself
+    # only tallies saved judgements.
     default_king_score, default_challenger_score = _score_pair(winner)
     session.add(
         Judgement(

@@ -8,12 +8,13 @@ other terminal outcome — success, an empty result, or a crashing (``agent_erro
 
 from __future__ import annotations
 
+import threading
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
-from tau.db import SolveJob
+from tau.db import DuelSolveJob, SolveJob
 from tau.sandbox import (
     EXIT_AGENT_ERROR,
     EXIT_COMPLETED,
@@ -27,19 +28,26 @@ from tau.workers.task_solver import loop as loop_mod
 class _FakeDb:
     def __init__(self) -> None:
         self.qualifications: list[dict] = []
-        self.solutions: list[dict] = []
+        self.duel_solutions: list[dict] = []
 
     def finish_qualification(self, **kw) -> None:
         self.qualifications.append(kw)
 
-    def save_task_solution(self, **kw) -> None:
-        self.solutions.append(kw)
+    def save_duel_task_solution(self, **kw) -> None:
+        self.duel_solutions.append(kw)
 
 
 def _job() -> SolveJob:
     return SolveJob(
         task_id="t1", submission_id="s1", problem_statement="p",
         repo_clone_url="u", base_commit="c",
+    )
+
+
+def _duel_job() -> DuelSolveJob:
+    return DuelSolveJob(
+        task_id="t1", submission_id="s1", challenger_submission_id="c1",
+        problem_statement="p", repo_clone_url="u", base_commit="c",
     )
 
 
@@ -64,8 +72,8 @@ def _qualify(db, cfg) -> None:
     loop_mod._qualify(_job(), db=db, client=None, config=cfg, image_tag="img")
 
 
-def _challenge(db, cfg) -> None:
-    loop_mod._solve_challenger(_job(), db=db, client=None, config=cfg, image_tag="img")
+def _duel(db, cfg) -> None:
+    loop_mod._solve_duel(_duel_job(), db=db, client=None, config=cfg, image_tag="img")
 
 
 # Retryable infra faults persist nothing; terminal outcomes persist a row/status.
@@ -75,6 +83,65 @@ _TERMINAL = [
     _result(EXIT_COMPLETED, success=True, diff=""),  # agent returned an empty result
     _result(EXIT_COMPLETED, success=True, diff="+added\n-removed"),  # real solution
 ]
+
+
+def test_tick_prioritizes_duel_jobs_before_qualification(monkeypatch) -> None:
+    calls: list[tuple[str, str]] = []
+    duel_jobs = [
+        _duel_job(),
+        DuelSolveJob(
+            task_id="t1",
+            submission_id="c1",
+            challenger_submission_id="c1",
+            problem_statement="p",
+            repo_clone_url="u",
+            base_commit="c",
+        ),
+    ]
+    qual_jobs = [
+        _job(),
+        SolveJob(
+            task_id="t2",
+            submission_id="s1",
+            problem_statement="p",
+            repo_clone_url="u",
+            base_commit="c",
+        ),
+    ]
+
+    class Db:
+        duel_limit: int | None = None
+        qualification_limit: int | None = None
+
+        def next_duel_jobs(self, limit: int) -> list[DuelSolveJob]:
+            self.duel_limit = limit
+            return duel_jobs[:limit]
+
+        def next_qualification_jobs(self, limit: int) -> list[SolveJob]:
+            self.qualification_limit = limit
+            return qual_jobs[:limit]
+
+    db = Db()
+    monkeypatch.setattr(
+        loop_mod, "_solve_duel", lambda job, **_kw: calls.append(("duel", job.submission_id))
+    )
+    monkeypatch.setattr(
+        loop_mod, "_qualify", lambda job, **_kw: calls.append(("qual", job.submission_id))
+    )
+
+    ran = loop_mod._tick(
+        db=db,
+        client=None,
+        config=SimpleNamespace(max_containers=3),
+        image_tag="img",
+        stop=threading.Event(),
+    )
+
+    assert ran == 3
+    assert db.duel_limit == 3
+    assert db.qualification_limit == 1
+    assert sum(kind == "duel" for kind, _submission in calls) == 2
+    assert sum(kind == "qual" for kind, _submission in calls) == 1
 
 
 # -- qualification -----------------------------------------------------------
@@ -102,22 +169,23 @@ def test_qualification_agent_error_disqualifies(monkeypatch) -> None:
     assert db.qualifications[0]["qualified"] is False
 
 
-# -- challenger --------------------------------------------------------------
+# -- duel --------------------------------------------------------------------
 @pytest.mark.parametrize("reason", _RETRYABLE)
-def test_challenger_infra_fault_persists_nothing(monkeypatch, reason) -> None:
+def test_duel_infra_fault_persists_nothing(monkeypatch, reason) -> None:
     _stub_run(monkeypatch, _result(reason))
     db, cfg = _FakeDb(), _config()
-    _challenge(db, cfg)
-    assert db.solutions == []  # no bogus solution; retried on a later tick
+    _duel(db, cfg)
+    assert db.duel_solutions == []  # no bogus solution; retried on a later tick
 
 
 @pytest.mark.parametrize("result", _TERMINAL)
-def test_challenger_terminal_outcome_saves_solution(monkeypatch, result) -> None:
+def test_duel_terminal_outcome_saves_solution(monkeypatch, result) -> None:
     _stub_run(monkeypatch, result)
     db, cfg = _FakeDb(), _config()
-    _challenge(db, cfg)
-    assert len(db.solutions) == 1  # bad agents (empty/crash) are saved instantly too
-    assert db.solutions[0]["exit_reason"] == result.exit_reason
+    _duel(db, cfg)
+    assert len(db.duel_solutions) == 1  # bad agents (empty/crash) are saved instantly too
+    assert db.duel_solutions[0]["exit_reason"] == result.exit_reason
+    assert db.duel_solutions[0]["challenger_submission_id"] == "c1"
 
 
 # -- Axiom failure routing (_report_failure) ---------------------------------

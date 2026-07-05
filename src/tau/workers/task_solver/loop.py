@@ -3,11 +3,13 @@
 Each tick gathers up to ``max_containers`` jobs and runs them **concurrently** (one
 sandbox per job, capped at ``max_containers``):
   Phase A (qualification): CANDIDATE tasks of the reigning king → run the king's
-    agent → QUALIFIED (store the king's solution) or DISQUALIFIED.
-  Phase B (challenger solve): QUALIFIED tasks in active challenges whose challenger
-    has no solution → run the challenger's agent → store the solution (judge fodder).
+    agent → QUALIFIED or DISQUALIFIED.
+  Phase B (duel solve): QUALIFIED tasks in active challenges whose king or challenger
+    side lacks a fresh challenge-scoped solution → run that side's agent → store the
+    solution for the judge.
 
-Phase A jobs are gathered first (qualification unblocks duels). Concurrency is safe:
+Phase B jobs are gathered first so an active duel is not starved by qualification
+backlog. Concurrency is safe:
 each solve is fully isolated — its own proxy (OS-assigned port) and auth token and its
 own work dir, all on the one shared internal sandbox network — and DB writes go through
 the engine's connection pool.
@@ -33,7 +35,7 @@ import docker
 
 from tau.axiom import get_axiom
 from tau.axiom.labels import Severity
-from tau.db import SolveJob, SolverDb
+from tau.db import DuelSolveJob, SolveJob, SolverDb
 from tau.sandbox import (
     EXIT_AGENT_ERROR,
     EXIT_COMPLETED,
@@ -86,7 +88,9 @@ _FAILURE_SEVERITY: dict[str, Severity] = {
 }
 
 
-def _report_failure(*, phase: str, job: SolveJob, result: AgentRunResult) -> None:
+def _report_failure(
+    *, phase: str, job: SolveJob | DuelSolveJob, result: AgentRunResult
+) -> None:
     """Emit a granular Axiom signal for a failed solve; no-op on a clean completion.
 
     Routes by suspected cause so each shows up distinctly in telemetry:
@@ -149,24 +153,26 @@ def _tick(
     stop: threading.Event,
 ) -> int:
     cap = config.max_containers
-    # Gather this tick's work (qualification first), capped at `cap` total.
-    qual_jobs = db.next_qualification_jobs(cap)
-    chal_jobs = (
-        db.next_challenger_jobs(cap - len(qual_jobs)) if len(qual_jobs) < cap else []
+    # Gather this tick's work (active duel first), capped at `cap` total.
+    duel_jobs = db.next_duel_jobs(cap)
+    qual_jobs = (
+        db.next_qualification_jobs(cap - len(duel_jobs))
+        if len(duel_jobs) < cap
+        else []
     )
     work: list[Callable[[], None]] = [
-        partial(_qualify, job, db=db, client=client, config=config, image_tag=image_tag)
-        for job in qual_jobs
-    ] + [
         partial(
-            _solve_challenger,
+            _solve_duel,
             job,
             db=db,
             client=client,
             config=config,
             image_tag=image_tag,
         )
-        for job in chal_jobs
+        for job in duel_jobs
+    ] + [
+        partial(_qualify, job, db=db, client=client, config=config, image_tag=image_tag)
+        for job in qual_jobs
     ]
     if not work:
         log.debug("tick: no pending work")
@@ -174,10 +180,10 @@ def _tick(
     if stop.is_set():
         return 0
     log.info(
-        "tick: running %d job(s) concurrently (%d qualification + %d challenger, cap=%d)",
+        "tick: running %d job(s) concurrently (%d duel + %d qualification, cap=%d)",
         len(work),
+        len(duel_jobs),
         len(qual_jobs),
-        len(chal_jobs),
         cap,
     )
 
@@ -265,8 +271,8 @@ def _qualify(
     )
 
 
-def _solve_challenger(
-    job: SolveJob,
+def _solve_duel(
+    job: DuelSolveJob,
     *,
     db: SolverDb,
     client: docker.DockerClient,
@@ -275,44 +281,49 @@ def _solve_challenger(
 ) -> None:
     agent_dir = _agent_dir(config, job.submission_id)
     if agent_dir is None:
-        return  # challenger bundle missing locally — leave unsolved, retry next tick
+        return  # submission bundle missing locally — leave unsolved, retry next tick
     log.info(
-        "solving task=%s with challenger=%s (cloning + sandboxing)…",
+        "solving duel task=%s challenge=%s submission=%s (cloning + sandboxing)…",
         job.task_id,
+        job.challenger_submission_id,
         job.submission_id,
     )
     result = _run(job, agent_dir, client=client, config=config, image_tag=image_tag)
-    _report_failure(phase="challenger", job=job, result=result)
+    _report_failure(phase="duel", job=job, result=result)
     if result.exit_reason in _RETRYABLE_EXIT_REASONS:
         # Miner-unrelated infra fault (LLM upstream or sandbox/docker) — do not persist a
         # bogus solution; leave the task unsolved so a later tick retries it. A bad agent
         # (crash / empty result) is NOT an infra fault and is saved below instead.
         log.warning(
-            "challenger solve task=%s challenger=%s hit %s (%s) — leaving unsolved for retry",
+            "duel solve task=%s challenge=%s submission=%s hit %s (%s) — leaving unsolved for retry",
             job.task_id,
+            job.challenger_submission_id,
             job.submission_id,
             result.exit_reason,
             result.error,
         )
         get_axiom().exception(
             "task-solver",
-            "challenger_infra_error",
+            "duel_infra_error",
             task_id=job.task_id,
+            challenger_submission_id=job.challenger_submission_id,
             submission_id=job.submission_id,
             exit_reason=result.exit_reason,
             error=result.error,
         )
         return
-    db.save_task_solution(
+    db.save_duel_task_solution(
         task_id=job.task_id,
+        challenger_submission_id=job.challenger_submission_id,
         submission_id=job.submission_id,
         solution=result.solution_diff,
         duration=result.elapsed_seconds,
         exit_reason=result.exit_reason,
     )
     log.info(
-        "challenger solve task=%s challenger=%s exit=%s success=%s",
+        "duel solve task=%s challenge=%s submission=%s exit=%s success=%s",
         job.task_id,
+        job.challenger_submission_id,
         job.submission_id,
         result.exit_reason,
         result.success,
@@ -321,6 +332,7 @@ def _solve_challenger(
         source="task-solver",
         event_type="solution",
         task_id=job.task_id,
+        challenger_submission_id=job.challenger_submission_id,
         submission_id=job.submission_id,
         exit_reason=result.exit_reason,
         success=result.success,
@@ -329,7 +341,7 @@ def _solve_challenger(
 
 
 def _run(
-    job: SolveJob,
+    job: SolveJob | DuelSolveJob,
     agent_dir: Path,
     *,
     client: docker.DockerClient,

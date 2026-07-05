@@ -7,7 +7,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
-from tau.duel import DuelScoringMethod
+from tau.duel import DEFAULT_MEAN_SCORE_MARGIN, DuelScoringMethod
 from tau.utils.env import env_bool, env_float, env_int, env_str
 
 
@@ -17,7 +17,7 @@ class DuelResolverConfig:
     # Margin for round-win scoring (`wins > losses + margin`).
     round_win_margin: int = 0
     # Margin for mean-score scoring (`challenger_mean - king_mean >= margin`).
-    mean_score_margin: float = 0.05
+    mean_score_margin: float = DEFAULT_MEAN_SCORE_MARGIN
     # Idle sleep between poll ticks (seconds).
     poll_seconds: float = 5.0
     # Optional GitHub publication for promoted local submission bundles.

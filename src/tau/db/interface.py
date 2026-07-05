@@ -51,8 +51,8 @@ class Database(Protocol):
         """Return the king/challenger solution pairs still awaiting a judgment.
 
         A pair is pending when a challenge ties a challenger to a king, the king
-        owns a task, both sides have a `task_solutions` row for that task, and no
-        `judgements` row records the outcome yet.
+        owns a task, both sides have a challenge-scoped `duel_task_solutions` row
+        for that task, and no `judgements` row records the outcome yet.
         """
         ...
 

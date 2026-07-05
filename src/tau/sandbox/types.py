@@ -8,7 +8,7 @@ from pathlib import Path
 from tau.proxy import SolveBudget, SolveUsageSummary
 
 # Why a solve ended. The budget reasons mirror tau.proxy's so a budget trip flows
-# straight through to the persisted task_solutions.exit_reason.
+# straight through to the persisted solution exit_reason.
 EXIT_COMPLETED = "completed"
 EXIT_TIME_LIMIT = "time_limit_exceeded"
 EXIT_NO_ACTIVITY = "no_activity_timeout"

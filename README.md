@@ -88,7 +88,7 @@ task pools and the cycle repeats.
 | **Challenger** | An eligible submission contesting the king in a `challenge`. |
 | **Task** | A commit-derived coding problem: repo clone URL + parent SHA + problem statement + hidden reference patch. |
 | **Pool** | A task set / duel stage. A duel is fought in `POOL_ONE` then `POOL_TWO`; each is a best-of series. |
-| **Solution** | An agent's patch (unified diff) for one task, in `task_solutions`. |
+| **Solution** | An agent's patch (unified diff) for one task. Duel inputs live in `duel_task_solutions`, scoped by challenge. |
 | **Judgement** | A blinded pairwise LLM verdict comparing the king's and challenger's solution for one task. |
 | **Duel / Challenge** | One king-vs-challenger contest, tracked in `challenges`, with per-pool verdicts in `duel_resolutions`. |
 
@@ -142,8 +142,8 @@ they read and write.
 |--------|------|-------|--------|----------------|
 | **chain-watcher** | Sync subnet membership from the Bittensor chain | chain metagraph, `registrations` | `registrations` | 6s |
 | **task-generator** | Mine GitHub commits → LLM task descriptions | `kings`, `tasks` (counts) | `tasks` (CANDIDATE), `task_generation_failures` | 30s |
-| **task-solver** | Run king/challenger agents in sandboxes | `kings`, `tasks`, `challenges`, `task_solutions` | `tasks` (QUALIFIED/DISQUALIFIED), `task_solutions` | 30s |
-| **judge** | Blinded pairwise LLM comparison | `tasks`, `kings`, `challenges`, `task_solutions`, `judgements` | `judgements` | 10s |
+| **task-solver** | Run king/challenger agents in sandboxes | `kings`, `tasks`, `challenges`, `duel_task_solutions` | `tasks` (QUALIFIED/DISQUALIFIED), `duel_task_solutions` | 30s |
+| **judge** | Blinded pairwise LLM comparison | `tasks`, `kings`, `challenges`, `duel_task_solutions`, `judgements` | `judgements` | 10s |
 | **duel-resolver** | Resolve duels, crown kings (**singleton**) | `kings`, `submissions`, `registrations`, `tasks`, `judgements`, `challenges` | `challenges`, `duel_resolutions`, `kings` | 5s |
 
 > **Submission ingestion is a seam.** The chain-watcher currently syncs
@@ -239,13 +239,13 @@ up to `MAX_CONTAINERS` sandboxes in parallel:
 
 1. **Qualify** — run the **king's** agent on `CANDIDATE` tasks. If the king
    succeeds and changes at least `TAU_SOLVER_QUALIFY_MIN_CHANGED_LINES` lines,
-   the task becomes `QUALIFIED` and the king's solution is stored; otherwise it
-   becomes `DISQUALIFIED` and is dropped.
-2. **Solve** — run the **challenger's** agent on `QUALIFIED` tasks of active
-   challenges that lack a challenger solution, storing the result to feed the
-   judge.
+   the task becomes `QUALIFIED`; otherwise it becomes `DISQUALIFIED` and is
+   dropped. This is only a task-quality gate, not the king's duel answer.
+2. **Solve** — for `QUALIFIED` tasks of active challenges, run whichever fresh
+   challenge-scoped side is missing: the king, the challenger, or both. These
+   `duel_task_solutions` rows feed the judge.
 
-Qualification is prioritized; challenger jobs fill the remaining capacity. See
+Active duel solves are prioritized; qualification jobs fill remaining capacity. See
 [§8](#8-agent-execution-environment-sandboxing) for how the sandbox works.
 
 | Loop | Database |
@@ -253,8 +253,8 @@ Qualification is prioritized; challenger jobs fill the remaining capacity. See
 | ![task-solver loop](docs/diagrams/loop-task-solver.png) | ![task-solver DB](docs/diagrams/db-task-solver.png) |
 
 - **Sets statuses:** `tasks.status_id` → `QUALIFIED (1)` or `DISQUALIFIED (2)`.
-- **Writes:** `task_solutions` (`solution` diff, `duration`, `exit_reason`),
-  idempotent on `(task_id, submission_id)`.
+- **Writes:** `duel_task_solutions` (`solution` diff, `duration`, `exit_reason`),
+  idempotent on `(task_id, challenger_submission_id, submission_id)`.
 - **Infra vs. miner faults:** an upstream/LLM outage or a sandbox/Docker failure
   (`EXIT_UPSTREAM_ERROR` / `EXIT_SANDBOX_ERROR`) is **retryable** — nothing is
   persisted and the task is picked up next tick. Everything else (agent crash,

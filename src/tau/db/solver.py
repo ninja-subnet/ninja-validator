@@ -6,12 +6,12 @@ docker/git work — async would buy nothing. Two reads drive the worker's two ph
 
   * ``next_qualification_jobs`` — CANDIDATE tasks of the reigning king, to be run
     against the king's own agent (viability check);
-  * ``next_challenger_jobs`` — QUALIFIED tasks in active challenges whose challenger
-    has no solution yet, to be run against the challenger's agent (judge fodder).
+  * ``next_duel_jobs`` — QUALIFIED tasks in active challenges where either side lacks
+    a fresh challenge-scoped solution, to be run against the king or challenger agent.
 
 Each job carries the *submission_id* whose agent should run; the worker resolves the
 actual agent files from the local submissions directory (folder == submission id).
-Writes (``finish_qualification`` / ``save_task_solution``) are idempotent via
+Writes (``finish_qualification`` / ``save_duel_task_solution``) are idempotent via
 ``ON CONFLICT``. It deliberately avoids the ``tau.bittensor`` imports that gate the
 full ``database.py``, so it can ship independently.
 """
@@ -21,7 +21,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 
-from sqlalchemy import and_, select, update
+from sqlalchemy import and_, or_, select, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.orm import aliased
 
@@ -36,9 +36,9 @@ log = logging.getLogger(__name__)
 class SolveJob:
     """One sandboxed solve: run *submission_id*'s agent on *task_id*.
 
-    Used uniformly by both phases — for qualification ``submission_id`` is the
-    king's submission; for challenger-solve it is the challenger's. The agent files
-    live on disk under ``<submissions_dir>/<submission_id>/``.
+    Used for qualification; duel solves use ``DuelSolveJob`` so they can carry the
+    challenge identity. The agent files live on disk under
+    ``<submissions_dir>/<submission_id>/``.
     """
 
     task_id: str
@@ -46,6 +46,23 @@ class SolveJob:
     problem_statement: str
     repo_clone_url: str
     base_commit: str  # tasks.parent_sha — the state to check out (before the fix)
+
+
+@dataclass(frozen=True, slots=True)
+class DuelSolveJob:
+    """One fresh duel solve, scoped to a specific challenge.
+
+    ``submission_id`` is the agent to run. ``challenger_submission_id`` is the
+    challenge identity, used to keep king solutions fresh per challenger instead of
+    cached globally by task.
+    """
+
+    task_id: str
+    submission_id: str
+    challenger_submission_id: str
+    problem_statement: str
+    repo_clone_url: str
+    base_commit: str
 
 
 class SolverDb:
@@ -112,12 +129,13 @@ class SolverDb:
         duration: float,
         exit_reason: str,
     ) -> None:
-        """Flip a CANDIDATE task to QUALIFIED/DISQUALIFIED; store the king solution on pass.
+        """Flip a CANDIDATE task to QUALIFIED/DISQUALIFIED.
 
-        One transaction. On QUALIFIED the king's ``task_solutions`` row is inserted
-        (``ON CONFLICT DO NOTHING``) so a duel/judge has the king side; on
-        DISQUALIFIED only the status changes.
+        Qualification is only a task-quality gate. Duel comparison solutions are
+        written later to ``duel_task_solutions`` so the king is re-run under the same
+        current inference conditions as the challenger for each challenge.
         """
+        _ = (king_submission_id, solution, duration, exit_reason)
         status = TaskStatus.QUALIFIED if qualified else TaskStatus.DISQUALIFIED
         with session_scope(self._sessions) as session:
             session.execute(
@@ -125,74 +143,134 @@ class SolverDb:
                 .where(models.Task.task_id == task_id)
                 .values(status_id=int(status))
             )
-            if qualified:
-                session.execute(
-                    insert(models.TaskSolution)
-                    .values(
-                        task_id=task_id,
-                        submission_id=king_submission_id,
-                        solution=solution,
-                        duration=duration,
-                        exit_reason=exit_reason,
-                    )
-                    .on_conflict_do_nothing(index_elements=["task_id", "submission_id"])
-                )
 
-    # -- phase B: challenger solve -------------------------------------------
-    def next_challenger_jobs(self, limit: int) -> list[SolveJob]:
-        """QUALIFIED tasks in active challenges whose challenger lacks a solution.
+    # -- phase B: fresh duel solves ------------------------------------------
+    def next_duel_jobs(self, limit: int) -> list[DuelSolveJob]:
+        """Fresh king/challenger solves still missing for active challenge rounds.
 
-        Anti-join mirror of ``v_active_unsolved_tasks`` but at ``(task, challenger)``
-        grain (the view is task-grain and can't express "this challenger has no
-        solution").
+        A row is scoped by ``(task_id, challenger_submission_id, submission_id)``.
+        That means the king runs again for each challenger rather than reusing the
+        qualification solve or a prior challenger's duel solve.
         """
         if limit <= 0:
             return []
-        chal_sol = aliased(models.TaskSolution)
+        king_sol = aliased(models.DuelTaskSolution)
+        chal_sol = aliased(models.DuelTaskSolution)
         stmt = (
             select(
                 models.Task.task_id,
                 models.Task.problem_statement,
                 models.Task.repo_clone_url,
                 models.Task.parent_sha,
+                models.Challenge.king_id.label("king_submission_id"),
                 models.Challenge.challenger_submission_id,
+                king_sol.task_id.label("king_solution_task_id"),
+                chal_sol.task_id.label("challenger_solution_task_id"),
             )
             .select_from(models.Challenge)
-            .join(models.King, models.King.king_id == models.Challenge.king_id)
             .join(
                 models.Task,
                 and_(
-                    models.Task.king_id == models.King.king_id,
+                    models.Task.king_id == models.Challenge.king_id,
                     models.Task.pool_type == models.Challenge.status,
                     models.Task.status_id == int(TaskStatus.QUALIFIED),
+                ),
+            )
+            .outerjoin(
+                king_sol,
+                and_(
+                    king_sol.task_id == models.Task.task_id,
+                    king_sol.challenger_submission_id
+                    == models.Challenge.challenger_submission_id,
+                    king_sol.submission_id == models.Challenge.king_id,
                 ),
             )
             .outerjoin(
                 chal_sol,
                 and_(
                     chal_sol.task_id == models.Task.task_id,
+                    chal_sol.challenger_submission_id
+                    == models.Challenge.challenger_submission_id,
                     chal_sol.submission_id == models.Challenge.challenger_submission_id,
                 ),
             )
             .where(
                 models.Challenge.status.in_((1, 2)),
-                chal_sol.task_id.is_(None),
+                or_(king_sol.task_id.is_(None), chal_sol.task_id.is_(None)),
             )
-            .order_by(models.Task.created_at, models.Challenge.challenger_submission_id)
+            .order_by(
+                models.Task.created_at,
+                models.Task.task_id,
+                models.Challenge.challenger_submission_id,
+            )
             .limit(limit)
         )
         with session_scope(self._sessions) as session:
             rows = session.execute(stmt).all()
-        return [
-            SolveJob(
-                task_id=row.task_id,
-                submission_id=row.challenger_submission_id,
-                problem_statement=row.problem_statement,
-                repo_clone_url=row.repo_clone_url,
-                base_commit=row.parent_sha,
+        jobs: list[DuelSolveJob] = []
+        for row in rows:
+            if row.king_solution_task_id is None:
+                jobs.append(
+                    DuelSolveJob(
+                        task_id=row.task_id,
+                        submission_id=row.king_submission_id,
+                        challenger_submission_id=row.challenger_submission_id,
+                        problem_statement=row.problem_statement,
+                        repo_clone_url=row.repo_clone_url,
+                        base_commit=row.parent_sha,
+                    )
+                )
+            if len(jobs) >= limit:
+                break
+            if row.challenger_solution_task_id is None:
+                jobs.append(
+                    DuelSolveJob(
+                        task_id=row.task_id,
+                        submission_id=row.challenger_submission_id,
+                        challenger_submission_id=row.challenger_submission_id,
+                        problem_statement=row.problem_statement,
+                        repo_clone_url=row.repo_clone_url,
+                        base_commit=row.parent_sha,
+                    )
+                )
+            if len(jobs) >= limit:
+                break
+        return jobs
+
+    def save_duel_task_solution(
+        self,
+        *,
+        task_id: str,
+        challenger_submission_id: str,
+        submission_id: str,
+        solution: str,
+        duration: float,
+        exit_reason: str,
+    ) -> None:
+        """Insert a fresh challenge-scoped solution row.
+
+        Idempotent on ``(task_id, challenger_submission_id, submission_id)`` so a
+        retry/race keeps the first terminal solve for that side of that round.
+        """
+        with session_scope(self._sessions) as session:
+            session.execute(
+                insert(models.DuelTaskSolution)
+                .values(
+                    task_id=task_id,
+                    challenger_submission_id=challenger_submission_id,
+                    submission_id=submission_id,
+                    solution=solution,
+                    duration=duration,
+                    exit_reason=exit_reason,
+                )
+                .on_conflict_do_nothing(
+                    index_elements=[
+                        "task_id",
+                        "challenger_submission_id",
+                        "submission_id",
+                    ]
+                )
             )
-            for row in rows
-        ]
 
     def save_task_solution(
         self,
@@ -203,7 +281,11 @@ class SolverDb:
         duration: float,
         exit_reason: str,
     ) -> None:
-        """Insert a solution row (idempotent on the ``(task_id, submission_id)`` PK)."""
+        """Insert a legacy task-grain solution row.
+
+        The live duel path writes ``duel_task_solutions`` instead; this remains for
+        compatibility with older local tooling.
+        """
         with session_scope(self._sessions) as session:
             session.execute(
                 insert(models.TaskSolution)

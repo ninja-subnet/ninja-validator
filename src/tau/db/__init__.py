@@ -22,7 +22,7 @@ from .engine import database_url, session_scope
 from .generator import GenerationMetrics, GeneratorDb, PoolDeficit
 from .judge import JudgeDb, JudgeRequest
 from .qualification import QualificationCandidate, QualificationDb
-from .solver import SolveJob, SolverDb
+from .solver import DuelSolveJob, SolveJob, SolverDb
 from .status import (
     ChallengeStatus,
     DuelOutcome,
@@ -46,6 +46,7 @@ __all__ = [
     "PoolDeficit",
     "ChallengeStatus",
     "DuelOutcome",
+    "DuelSolveJob",
     "SolveJob",
     "SolverDb",
     "PoolType",

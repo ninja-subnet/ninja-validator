@@ -1,9 +1,9 @@
 """SQLAlchemy ORM models — the runtime view of the validator schema.
 
-These mirror the schema in the Alembic migration
-`deploy/migrate/alembic/versions/0001_initial.py`. Tests build the schema from these
-models (`Base.metadata.create_all`); the migration is the deploy path. Keep the two
-in sync — a column changed here must be reflected in the migration.
+These mirror the schema in the Alembic migrations under
+`deploy/migrate/alembic/versions/`. Tests build the schema from these models
+(`Base.metadata.create_all`); the migrations are the deploy path. Keep the two in sync
+— a column changed here must be reflected in a migration.
 """
 
 from __future__ import annotations
@@ -269,6 +269,7 @@ class Task(Base):
 
     king: Mapped[King] = relationship(back_populates="tasks")
     solutions: Mapped[list[TaskSolution]] = relationship(back_populates="task")
+    duel_solutions: Mapped[list[DuelTaskSolution]] = relationship(back_populates="task")
 
     __table_args__ = (
         Index("uq_tasks_fingerprint", "content_fingerprint", unique=True),
@@ -316,6 +317,12 @@ class TaskGenerationFailure(Base):
 
 
 class TaskSolution(Base):
+    """Legacy task-grain solution cache.
+
+    Duel comparisons use ``DuelTaskSolution`` so each king-vs-challenger challenge
+    gets fresh solves under the same current inference conditions.
+    """
+
     __tablename__ = "task_solutions"
 
     task_id: Mapped[str] = mapped_column(
@@ -335,6 +342,47 @@ class TaskSolution(Base):
     __table_args__ = (
         PrimaryKeyConstraint("task_id", "submission_id"),
         Index("ix_task_solutions_submission_id", "submission_id"),
+    )
+
+
+class DuelTaskSolution(Base):
+    """A fresh agent patch for one task within one challenge.
+
+    ``challenger_submission_id`` is the challenge identity. The ``submission_id`` is
+    the solver that produced the patch, either the challenge's king or its challenger.
+    This keeps the king side from becoming a task-wide cache reused across future
+    challengers.
+    """
+
+    __tablename__ = "duel_task_solutions"
+
+    task_id: Mapped[str] = mapped_column(
+        Text, ForeignKey("tasks.task_id", ondelete="CASCADE"), nullable=False
+    )
+    challenger_submission_id: Mapped[str] = mapped_column(
+        Text,
+        ForeignKey("challenges.challenger_submission_id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    submission_id: Mapped[str] = mapped_column(
+        Text,
+        ForeignKey("submissions.submission_id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    solution: Mapped[str | None] = mapped_column(Text)
+    duration: Mapped[float | None] = mapped_column(Float)
+    exit_reason: Mapped[str | None] = mapped_column(Text)
+
+    task: Mapped[Task] = relationship(back_populates="duel_solutions")
+
+    __table_args__ = (
+        PrimaryKeyConstraint("task_id", "challenger_submission_id", "submission_id"),
+        Index(
+            "ix_duel_task_solutions_challenge",
+            "challenger_submission_id",
+            "task_id",
+        ),
+        Index("ix_duel_task_solutions_submission_id", "submission_id"),
     )
 
 
@@ -366,16 +414,22 @@ class Judgement(Base):
             "task_id", "king_submission_id", "challenger_submission_id"
         ),
         ForeignKeyConstraint(
-            ["task_id", "king_submission_id"],
-            ["task_solutions.task_id", "task_solutions.submission_id"],
+            ["task_id"],
+            ["tasks.task_id"],
             ondelete="CASCADE",
-            name="fk_judgements_king_solution",
+            name="fk_judgements_task",
         ),
         ForeignKeyConstraint(
-            ["task_id", "challenger_submission_id"],
-            ["task_solutions.task_id", "task_solutions.submission_id"],
+            ["king_submission_id"],
+            ["submissions.submission_id"],
             ondelete="CASCADE",
-            name="fk_judgements_challenger_solution",
+            name="fk_judgements_king_submission",
+        ),
+        ForeignKeyConstraint(
+            ["challenger_submission_id"],
+            ["challenges.challenger_submission_id"],
+            ondelete="CASCADE",
+            name="fk_judgements_challenge",
         ),
         Index("ix_judgements_king", "task_id", "king_submission_id"),
         Index("ix_judgements_challenger", "task_id", "challenger_submission_id"),
