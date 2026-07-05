@@ -19,7 +19,7 @@ from .predicates import (
     challenger_is_unbeatable,
     challenger_wins_by_mean_score,
 )
-from .scoring import DuelScoringMethod
+from .scoring import DEFAULT_MEAN_SCORE_MARGIN, DuelScoringMethod
 from .snapshot import ActiveChallenge, ChallengeSnapshot
 
 _POOL_ONE = 1
@@ -30,7 +30,7 @@ def decide(
     *,
     scoring_method: DuelScoringMethod = DuelScoringMethod.ROUND_WINS,
     round_win_margin: int = 0,
-    mean_score_margin: float = 0.0,
+    mean_score_margin: float = DEFAULT_MEAN_SCORE_MARGIN,
 ) -> Action:
     """Map *snapshot* to the one action due this tick, cheapest states first."""
     if snapshot.reigning_king_submission_id is None:

@@ -9,6 +9,7 @@ from tau.duel import (
     ChallengeSnapshot,
     CloseChallenge,
     CloseReason,
+    DEFAULT_MEAN_SCORE_MARGIN,
     DuelScoringMethod,
     Nothing,
     OpenChallenge,
@@ -254,6 +255,25 @@ def test_mean_scoring_king_holds_when_margin_does_not_clear() -> None:
         _snapshot(active),
         scoring_method=DuelScoringMethod.MEAN,
         mean_score_margin=0.05,
+    ) == CloseChallenge(active, CloseReason.KING_DEFENDED)
+
+
+def test_mean_scoring_default_margin_is_005() -> None:
+    active = _active(
+        P1,
+        wins=0,
+        losses=0,
+        ties=2,
+        target=2,
+        king_score_mean=0.50,
+        challenger_score_mean=0.54,
+        score_mean_delta=0.04,
+        score_mean_rounds=2,
+    )
+    assert DEFAULT_MEAN_SCORE_MARGIN == 0.05
+    assert decide(
+        _snapshot(active),
+        scoring_method=DuelScoringMethod.MEAN,
     ) == CloseChallenge(active, CloseReason.KING_DEFENDED)
 
 
