@@ -17,7 +17,17 @@ from sqlalchemy import make_url, select, text
 
 from tau.db import SolverDb, TaskStatus
 from tau.db.engine import create_db_engine, session_factory, session_scope
-from tau.db.models import Base, Challenge, King, Submission, Task, TaskSolution
+from tau.db.models import (
+    Base,
+    Challenge,
+    DuelTaskSolution,
+    King,
+    Submission,
+    Task,
+    TaskSolution,
+)
+from tau.db.solver import _duel_side_order
+from tau.pools import PoolTargets
 
 load_dotenv(Path(__file__).resolve().parent.parent / ".env")
 _TEST_URL = os.environ.get("TAU_TEST_DATABASE_URL")
@@ -156,7 +166,9 @@ def test_qualification_jobs_respects_limit(db: SolverDb) -> None:
     assert len(db.next_qualification_jobs(2)) == 2
 
 
-def test_finish_qualification_qualified_sets_status_and_stores_solution(db: SolverDb) -> None:
+def test_finish_qualification_qualified_sets_status_without_cached_solution(
+    db: SolverDb,
+) -> None:
     def seed(s):  # noqa: ANN001
         _submission(s, "king-1")
         _king(s, "king-1")
@@ -170,8 +182,7 @@ def test_finish_qualification_qualified_sets_status_and_stores_solution(db: Solv
     with session_scope(session_factory(db._engine)) as session:  # noqa: SLF001
         task = session.get(Task, "t1")
         assert task.status_id == int(TaskStatus.QUALIFIED)
-        sol = session.get(TaskSolution, {"task_id": "t1", "submission_id": "king-1"})
-        assert sol is not None and sol.solution.startswith("diff")
+        assert session.get(TaskSolution, {"task_id": "t1", "submission_id": "king-1"}) is None
 
 
 def test_finish_qualification_disqualified_sets_status_no_solution(db: SolverDb) -> None:
@@ -191,7 +202,7 @@ def test_finish_qualification_disqualified_sets_status_no_solution(db: SolverDb)
         assert rows == []
 
 
-# -- phase B: challenger solve -----------------------------------------------------
+# -- phase B: fresh duel solves ----------------------------------------------------
 
 
 def _seed_active_challenge(db: SolverDb) -> None:
@@ -216,30 +227,154 @@ def _seed_active_challenge(db: SolverDb) -> None:
     _seed(db, seed)
 
 
-def test_challenger_jobs_returns_unsolved_qualified_for_active_challenge(db: SolverDb) -> None:
+def _expected_duel_pair(
+    task_id: str,
+    *,
+    king_submission_id: str = "king-1",
+    challenger_submission_id: str = "sub-chal",
+) -> list[tuple[str, str, str]]:
+    return [
+        (
+            task_id,
+            king_submission_id if side == "king" else challenger_submission_id,
+            challenger_submission_id,
+        )
+        for side in _duel_side_order(
+            task_id=task_id,
+            king_submission_id=king_submission_id,
+            challenger_submission_id=challenger_submission_id,
+        )
+    ]
+
+
+def test_duel_jobs_returns_unsolved_king_and_challenger_for_active_challenge(
+    db: SolverDb,
+) -> None:
     _seed_active_challenge(db)
-    jobs = db.next_challenger_jobs(10)
-    assert [j.task_id for j in jobs] == ["t1"]
-    assert jobs[0].submission_id == "sub-chal"
+    jobs = db.next_duel_jobs(10)
+    assert [
+        (j.task_id, j.submission_id, j.challenger_submission_id) for j in jobs
+    ] == _expected_duel_pair("t1")
     assert jobs[0].base_commit == _PARENT
 
 
-def test_challenger_jobs_excludes_already_solved(db: SolverDb) -> None:
+def test_duel_jobs_preserves_complete_pairs_when_capacity_is_odd(db: SolverDb) -> None:
     _seed_active_challenge(db)
-    db.save_task_solution(
-        task_id="t1", submission_id="sub-chal", solution="diff", duration=1.0,
+
+    def add_second_qualified(s):  # noqa: ANN001
+        _task(s, "t2", "king-1", pool_type=1, status_id=int(TaskStatus.QUALIFIED), fp="f4")
+
+    _seed(db, add_second_qualified)
+
+    jobs = db.next_duel_jobs(3)
+
+    assert [
+        (j.task_id, j.submission_id, j.challenger_submission_id) for j in jobs
+    ] == _expected_duel_pair("t1")
+
+
+def test_duel_jobs_can_wait_for_full_qualified_pool(db: SolverDb) -> None:
+    _seed_active_challenge(db)
+    targets = PoolTargets(pool_one=2, pool_two=2)
+
+    assert (
+        db.next_duel_jobs(10, require_full_pool=True, pool_targets=targets)
+        == []
+    )
+
+    def add_second_qualified(s):  # noqa: ANN001
+        _task(s, "t2", "king-1", pool_type=1, status_id=int(TaskStatus.QUALIFIED), fp="f4")
+
+    _seed(db, add_second_qualified)
+    jobs = db.next_duel_jobs(10, require_full_pool=True, pool_targets=targets)
+    assert [(j.task_id, j.submission_id, j.challenger_submission_id) for j in jobs] == (
+        _expected_duel_pair("t1") + _expected_duel_pair("t2")
+    )
+
+
+def test_duel_jobs_excludes_each_already_solved_side(db: SolverDb) -> None:
+    _seed_active_challenge(db)
+    db.save_duel_task_solution(
+        task_id="t1", challenger_submission_id="sub-chal", submission_id="king-1",
+        solution="king diff", duration=1.0,
         exit_reason="completed",
     )
-    assert db.next_challenger_jobs(10) == []
+    jobs = db.next_duel_jobs(10)
+    assert [(j.task_id, j.submission_id) for j in jobs] == [("t1", "sub-chal")]
+
+    db.save_duel_task_solution(
+        task_id="t1", challenger_submission_id="sub-chal", submission_id="sub-chal",
+        solution="challenger diff", duration=1.0,
+        exit_reason="completed",
+    )
+    assert db.next_duel_jobs(10) == []
 
 
-def test_save_task_solution_is_idempotent(db: SolverDb) -> None:
+def test_save_duel_task_solution_is_idempotent(db: SolverDb) -> None:
     _seed_active_challenge(db)
     for _ in range(2):
-        db.save_task_solution(
-            task_id="t1", submission_id="sub-chal", solution="diff", duration=1.0,
+        db.save_duel_task_solution(
+            task_id="t1", challenger_submission_id="sub-chal",
+            submission_id="sub-chal", solution="diff", duration=1.0,
             exit_reason="completed",
         )
     with session_scope(session_factory(db._engine)) as session:  # noqa: SLF001
-        rows = session.scalars(select(TaskSolution)).all()
+        rows = session.scalars(select(DuelTaskSolution)).all()
     assert len(rows) == 1
+
+
+def test_save_duel_task_solution_keeps_only_safe_usage_summary(db: SolverDb) -> None:
+    _seed_active_challenge(db)
+    db.save_duel_task_solution(
+        task_id="t1",
+        challenger_submission_id="sub-chal",
+        submission_id="sub-chal",
+        solution="diff",
+        duration=1.0,
+        exit_reason="completed",
+        usage_summary={
+            "request_count": 1,
+            "prompt_tokens": 10,
+            "completion_tokens": 5,
+            "total_tokens": 15,
+            "cost": 0.0,
+            "last_upstream_error": "internal-upstream.invalid do-not-publish marker",
+            "requests": [
+                {
+                    "method": "POST",
+                    "path": "http://internal-upstream.invalid/v1/chat/completions",
+                    "status_code": 200,
+                    "latency_ms": 250,
+                    "prompt_tokens": 10,
+                    "completion_tokens": 5,
+                    "total_tokens": 15,
+                    "error": "do-not-publish marker from internal-upstream.invalid",
+                }
+            ],
+        },
+    )
+
+    with session_scope(session_factory(db._engine)) as session:  # noqa: SLF001
+        row = session.scalars(select(DuelTaskSolution)).one()
+
+    assert row.usage_summary == {
+        "request_count": 1,
+        "prompt_tokens": 10,
+        "completion_tokens": 5,
+        "total_tokens": 15,
+        "requests": [
+            {
+                "index": 0,
+                "method": "POST",
+                "status_code": 200,
+                "latency_ms": 250,
+                "prompt_tokens": 10,
+                "completion_tokens": 5,
+                "total_tokens": 15,
+            }
+        ],
+    }
+    encoded = str(row.usage_summary)
+    assert "internal-upstream.invalid" not in encoded
+    assert "do-not-publish marker" not in encoded
+    assert "chat/completions" not in encoded

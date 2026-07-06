@@ -6,24 +6,29 @@ docker/git work — async would buy nothing. Two reads drive the worker's two ph
 
   * ``next_qualification_jobs`` — CANDIDATE tasks of the reigning king, to be run
     against the king's own agent (viability check);
-  * ``next_challenger_jobs`` — QUALIFIED tasks in active challenges whose challenger
-    has no solution yet, to be run against the challenger's agent (judge fodder).
+  * ``next_duel_jobs`` — QUALIFIED tasks in active challenges where either side lacks
+    a fresh challenge-scoped solution, to be run against the king or challenger agent.
 
 Each job carries the *submission_id* whose agent should run; the worker resolves the
 actual agent files from the local submissions directory (folder == submission id).
-Writes (``finish_qualification`` / ``save_task_solution``) are idempotent via
+Writes (``finish_qualification`` / ``save_duel_task_solution``) are idempotent via
 ``ON CONFLICT``. It deliberately avoids the ``tau.bittensor`` imports that gate the
 full ``database.py``, so it can ship independently.
 """
 
 from __future__ import annotations
 
+import hashlib
 import logging
+from collections.abc import Mapping
 from dataclasses import dataclass
+from typing import Any
 
-from sqlalchemy import and_, select, update
+from sqlalchemy import and_, case, func, or_, select, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.orm import aliased
+
+from tau.pools import PoolTargets
 
 from . import models
 from .engine import create_db_engine, session_factory, session_scope
@@ -36,9 +41,9 @@ log = logging.getLogger(__name__)
 class SolveJob:
     """One sandboxed solve: run *submission_id*'s agent on *task_id*.
 
-    Used uniformly by both phases — for qualification ``submission_id`` is the
-    king's submission; for challenger-solve it is the challenger's. The agent files
-    live on disk under ``<submissions_dir>/<submission_id>/``.
+    Used for qualification; duel solves use ``DuelSolveJob`` so they can carry the
+    challenge identity. The agent files live on disk under
+    ``<submissions_dir>/<submission_id>/``.
     """
 
     task_id: str
@@ -46,6 +51,23 @@ class SolveJob:
     problem_statement: str
     repo_clone_url: str
     base_commit: str  # tasks.parent_sha — the state to check out (before the fix)
+
+
+@dataclass(frozen=True, slots=True)
+class DuelSolveJob:
+    """One fresh duel solve, scoped to a specific challenge.
+
+    ``submission_id`` is the agent to run. ``challenger_submission_id`` is the
+    challenge identity, used to keep king solutions fresh per challenger instead of
+    cached globally by task.
+    """
+
+    task_id: str
+    submission_id: str
+    challenger_submission_id: str
+    problem_statement: str
+    repo_clone_url: str
+    base_commit: str
 
 
 class SolverDb:
@@ -112,12 +134,13 @@ class SolverDb:
         duration: float,
         exit_reason: str,
     ) -> None:
-        """Flip a CANDIDATE task to QUALIFIED/DISQUALIFIED; store the king solution on pass.
+        """Flip a CANDIDATE task to QUALIFIED/DISQUALIFIED.
 
-        One transaction. On QUALIFIED the king's ``task_solutions`` row is inserted
-        (``ON CONFLICT DO NOTHING``) so a duel/judge has the king side; on
-        DISQUALIFIED only the status changes.
+        Qualification is only a task-quality gate. Duel comparison solutions are
+        written later to ``duel_task_solutions`` so the king is re-run under the same
+        current inference conditions as the challenger for each challenge.
         """
+        _ = (king_submission_id, solution, duration, exit_reason)
         status = TaskStatus.QUALIFIED if qualified else TaskStatus.DISQUALIFIED
         with session_scope(self._sessions) as session:
             session.execute(
@@ -125,74 +148,154 @@ class SolverDb:
                 .where(models.Task.task_id == task_id)
                 .values(status_id=int(status))
             )
-            if qualified:
-                session.execute(
-                    insert(models.TaskSolution)
-                    .values(
-                        task_id=task_id,
-                        submission_id=king_submission_id,
-                        solution=solution,
-                        duration=duration,
-                        exit_reason=exit_reason,
-                    )
-                    .on_conflict_do_nothing(index_elements=["task_id", "submission_id"])
-                )
 
-    # -- phase B: challenger solve -------------------------------------------
-    def next_challenger_jobs(self, limit: int) -> list[SolveJob]:
-        """QUALIFIED tasks in active challenges whose challenger lacks a solution.
+    # -- phase B: fresh duel solves ------------------------------------------
+    def next_duel_jobs(
+        self,
+        limit: int,
+        *,
+        require_full_pool: bool = False,
+        pool_targets: PoolTargets | None = None,
+    ) -> list[DuelSolveJob]:
+        """Fresh king/challenger solves still missing for active challenge rounds.
 
-        Anti-join mirror of ``v_active_unsolved_tasks`` but at ``(task, challenger)``
-        grain (the view is task-grain and can't express "this challenger has no
-        solution").
+        A row is scoped by ``(task_id, challenger_submission_id, submission_id)``.
+        That means the king runs again for each challenger rather than reusing the
+        qualification solve or a prior challenger's duel solve.
+        When ``require_full_pool`` is true, active challenge pools are ignored until
+        the matching pool has reached its configured count of QUALIFIED tasks.
         """
         if limit <= 0:
             return []
-        chal_sol = aliased(models.TaskSolution)
+        if pool_targets is None:
+            pool_targets = PoolTargets()
+        king_sol = aliased(models.DuelTaskSolution)
+        chal_sol = aliased(models.DuelTaskSolution)
         stmt = (
             select(
                 models.Task.task_id,
                 models.Task.problem_statement,
                 models.Task.repo_clone_url,
                 models.Task.parent_sha,
+                models.Challenge.king_id.label("king_submission_id"),
                 models.Challenge.challenger_submission_id,
+                king_sol.task_id.label("king_solution_task_id"),
+                chal_sol.task_id.label("challenger_solution_task_id"),
             )
             .select_from(models.Challenge)
-            .join(models.King, models.King.king_id == models.Challenge.king_id)
             .join(
                 models.Task,
                 and_(
-                    models.Task.king_id == models.King.king_id,
+                    models.Task.king_id == models.Challenge.king_id,
                     models.Task.pool_type == models.Challenge.status,
                     models.Task.status_id == int(TaskStatus.QUALIFIED),
+                ),
+            )
+            .outerjoin(
+                king_sol,
+                and_(
+                    king_sol.task_id == models.Task.task_id,
+                    king_sol.challenger_submission_id
+                    == models.Challenge.challenger_submission_id,
+                    king_sol.submission_id == models.Challenge.king_id,
                 ),
             )
             .outerjoin(
                 chal_sol,
                 and_(
                     chal_sol.task_id == models.Task.task_id,
+                    chal_sol.challenger_submission_id
+                    == models.Challenge.challenger_submission_id,
                     chal_sol.submission_id == models.Challenge.challenger_submission_id,
                 ),
             )
             .where(
                 models.Challenge.status.in_((1, 2)),
-                chal_sol.task_id.is_(None),
+                or_(king_sol.task_id.is_(None), chal_sol.task_id.is_(None)),
             )
-            .order_by(models.Task.created_at, models.Challenge.challenger_submission_id)
-            .limit(limit)
+            .order_by(
+                models.Task.created_at,
+                models.Task.task_id,
+                models.Challenge.challenger_submission_id,
+            )
+            .limit(limit * 2)
         )
+        if require_full_pool:
+            qualified_count = (
+                select(func.count(models.Task.task_id))
+                .where(
+                    models.Task.king_id == models.Challenge.king_id,
+                    models.Task.pool_type == models.Challenge.status,
+                    models.Task.status_id == int(TaskStatus.QUALIFIED),
+                )
+                .correlate(models.Challenge)
+                .scalar_subquery()
+            )
+            pool_target = case(
+                (models.Challenge.status == 1, pool_targets.pool_one),
+                (models.Challenge.status == 2, pool_targets.pool_two),
+                else_=pool_targets.pool_two,
+            )
+            stmt = stmt.where(qualified_count >= pool_target)
         with session_scope(self._sessions) as session:
             rows = session.execute(stmt).all()
-        return [
-            SolveJob(
-                task_id=row.task_id,
-                submission_id=row.challenger_submission_id,
-                problem_statement=row.problem_statement,
-                repo_clone_url=row.repo_clone_url,
-                base_commit=row.parent_sha,
+        jobs: list[DuelSolveJob] = []
+        for row in rows:
+            missing_king = row.king_solution_task_id is None
+            missing_challenger = row.challenger_solution_task_id is None
+            if missing_king and missing_challenger:
+                if len(jobs) + 2 > limit:
+                    continue
+                for side in _duel_side_order(
+                    task_id=row.task_id,
+                    king_submission_id=row.king_submission_id,
+                    challenger_submission_id=row.challenger_submission_id,
+                ):
+                    jobs.append(_duel_job_for_side(row, side=side))
+            elif missing_king and len(jobs) < limit:
+                jobs.append(_duel_job_for_side(row, side="king"))
+            elif missing_challenger and len(jobs) < limit:
+                jobs.append(_duel_job_for_side(row, side="challenger"))
+            if len(jobs) >= limit:
+                break
+        return jobs
+
+    def save_duel_task_solution(
+        self,
+        *,
+        task_id: str,
+        challenger_submission_id: str,
+        submission_id: str,
+        solution: str,
+        duration: float,
+        exit_reason: str,
+        usage_summary: Mapping[str, Any] | None = None,
+    ) -> None:
+        """Insert a fresh challenge-scoped solution row.
+
+        Idempotent on ``(task_id, challenger_submission_id, submission_id)`` so a
+        retry/race keeps the first terminal solve for that side of that round.
+        """
+        with session_scope(self._sessions) as session:
+            session.execute(
+                insert(models.DuelTaskSolution)
+                .values(
+                    task_id=task_id,
+                    challenger_submission_id=challenger_submission_id,
+                    submission_id=submission_id,
+                    solution=solution,
+                    duration=duration,
+                    exit_reason=exit_reason,
+                    usage_summary=_sanitize_usage_summary(usage_summary),
+                )
+                .on_conflict_do_nothing(
+                    index_elements=[
+                        "task_id",
+                        "challenger_submission_id",
+                        "submission_id",
+                    ]
+                )
             )
-            for row in rows
-        ]
 
     def save_task_solution(
         self,
@@ -203,7 +306,11 @@ class SolverDb:
         duration: float,
         exit_reason: str,
     ) -> None:
-        """Insert a solution row (idempotent on the ``(task_id, submission_id)`` PK)."""
+        """Insert a legacy task-grain solution row.
+
+        The live duel path writes ``duel_task_solutions`` instead; this remains for
+        compatibility with older local tooling.
+        """
         with session_scope(self._sessions) as session:
             session.execute(
                 insert(models.TaskSolution)
@@ -216,3 +323,139 @@ class SolverDb:
                 )
                 .on_conflict_do_nothing(index_elements=["task_id", "submission_id"])
             )
+
+
+def _duel_side_order(
+    *,
+    task_id: str,
+    king_submission_id: str,
+    challenger_submission_id: str,
+) -> tuple[str, str]:
+    """Return a stable, roughly balanced side order for a duel task."""
+    key = "\0".join((challenger_submission_id, king_submission_id, task_id))
+    first_byte = hashlib.blake2b(key.encode("utf-8"), digest_size=1).digest()[0]
+    if first_byte % 2 == 0:
+        return ("king", "challenger")
+    return ("challenger", "king")
+
+
+def _duel_job_for_side(row: Any, *, side: str) -> DuelSolveJob:
+    if side == "king":
+        submission_id = row.king_submission_id
+    elif side == "challenger":
+        submission_id = row.challenger_submission_id
+    else:  # pragma: no cover - defensive only; callers use the two literals above.
+        raise ValueError(f"unknown duel side: {side}")
+    return DuelSolveJob(
+        task_id=row.task_id,
+        submission_id=submission_id,
+        challenger_submission_id=row.challenger_submission_id,
+        problem_statement=row.problem_statement,
+        repo_clone_url=row.repo_clone_url,
+        base_commit=row.parent_sha,
+    )
+
+
+def _sanitize_usage_summary(
+    usage_summary: Mapping[str, Any] | None,
+) -> dict[str, Any] | None:
+    """Persist only infrastructure-safe solve telemetry.
+
+    The proxy can observe richer request state, but the DB should never retain raw
+    bodies, headers, upstream URLs, error strings, API keys, or server addresses.
+    """
+    if not usage_summary:
+        return None
+    output: dict[str, Any] = {}
+    int_keys = (
+        "request_count",
+        "rejected_request_count",
+        "first_token_count",
+        "success_count",
+        "error_count",
+        "upstream_error_count",
+        "upstream_timeout_count",
+        "prompt_tokens",
+        "completion_tokens",
+        "total_tokens",
+        "cached_tokens",
+        "cache_write_tokens",
+        "reasoning_tokens",
+    )
+    for key in int_keys:
+        value = _int_or_none(usage_summary.get(key))
+        if value is not None:
+            output[key] = value
+    requests = usage_summary.get("requests")
+    observed_request_cost = (
+        any(
+            isinstance(raw, Mapping) and _float_or_none(raw.get("cost")) is not None
+            for raw in requests
+        )
+        if isinstance(requests, list)
+        else False
+    )
+    cost = _float_or_none(usage_summary.get("cost"))
+    if cost is not None and (cost != 0.0 or observed_request_cost):
+        output["cost"] = cost
+    budget_reason = usage_summary.get("budget_exceeded_reason")
+    if budget_reason is not None:
+        output["budget_exceeded_reason"] = str(budget_reason)[:120]
+
+    if isinstance(requests, list):
+        output["requests"] = [
+            request
+            for index, raw in enumerate(requests)
+            if (request := _sanitize_request_record(raw, index=index)) is not None
+        ]
+    return output or None
+
+
+def _sanitize_request_record(raw: object, *, index: int) -> dict[str, Any] | None:
+    if not isinstance(raw, Mapping):
+        return None
+    output: dict[str, Any] = {"index": index}
+    method = raw.get("method")
+    if method is not None:
+        method_text = str(method).upper()
+        if method_text in {"GET", "POST", "PUT", "PATCH", "DELETE"}:
+            output["method"] = method_text
+    for key in (
+        "status_code",
+        "latency_ms",
+        "first_token_latency_ms",
+        "prompt_tokens",
+        "completion_tokens",
+        "total_tokens",
+        "cached_tokens",
+        "cache_write_tokens",
+        "reasoning_tokens",
+    ):
+        value = _int_or_none(raw.get(key))
+        if value is not None:
+            output[key] = value
+    cost = _float_or_none(raw.get("cost"))
+    if cost is not None:
+        output["cost"] = cost
+    rejected = raw.get("rejected")
+    if rejected is not None:
+        output["rejected"] = bool(rejected)
+    return output
+
+
+def _int_or_none(value: object) -> int | None:
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _float_or_none(value: object) -> float | None:
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None

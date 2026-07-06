@@ -216,6 +216,10 @@ services:
     env_file: .env
     environment:
       DATABASE_URL: postgresql+psycopg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB}
+    volumes:
+      # The resolver publishes promoted private bundles to GitHub before crowning.
+      # Mount the same submissions directory it reads from TAU_SUBMISSIONS_DIR.
+      - ${TAU_SUBMISSIONS_DIR:-/srv/tau/submissions}:${TAU_SUBMISSIONS_DIR:-/srv/tau/submissions}:ro
     depends_on:
       db:
         condition: service_healthy
@@ -240,6 +244,30 @@ services:
     volumes:
       # The wallet's hotkey signs the set_weights extrinsic (read-only mount).
       - ${HOST_BITTENSOR_WALLETS:-${HOME}/.bittensor/wallets}:/wallets:ro
+    depends_on:
+      db:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    restart: unless-stopped
+
+  # Public dashboard API for ninja66.ai. Nginx serves the static shell and proxies
+  # the live JSON routes here; S3/Hippius remains only for immutable duel archives.
+  dashboard:
+    build:
+      context: .
+      dockerfile: deploy/worker/Dockerfile
+      args:
+        EXTRA: dashboard
+        WORKER: tau-dashboard-api
+    container_name: pg_stack_dashboard
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB}
+      TAU_DASHBOARD_HOST: 0.0.0.0
+      TAU_DASHBOARD_PORT: 8066
+    ports:
+      - "127.0.0.1:${TAU_DASHBOARD_HOST_PORT:-8066}:8066"
     depends_on:
       db:
         condition: service_healthy

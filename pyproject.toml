@@ -25,6 +25,7 @@ bittensor = []
 judge = []
 task-generator = []
 duel-resolver = []
+dashboard = []
 qualification = []
 weight-setter = []
 task-solver = []
@@ -37,6 +38,7 @@ judge-worker = "tau.workers.judge:main"
 task-generator = "tau.workers.task_generator:main"
 qualification-worker = "tau.workers.qualification:main"
 duel-resolver = "tau.workers.duel_resolver:main"
+tau-dashboard-api = "tau.dashboard.main:main"
 task-solver = "tau.workers.task_solver:main"
 weight-setter = "tau.workers.weight_setter:main"
 

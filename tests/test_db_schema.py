@@ -5,7 +5,16 @@ from __future__ import annotations
 from sqlalchemy import CheckConstraint
 
 from tau.db import ChallengeStatus, GeneratorDb, PoolType, SubmissionStatus, TaskStatus
-from tau.db.models import Challenge, King, Submission, SubmissionQualification, Task
+from tau.db.solver import _duel_side_order
+from tau.db.models import (
+    Challenge,
+    DuelTaskSolution,
+    Judgement,
+    King,
+    Submission,
+    SubmissionQualification,
+    Task,
+)
 
 
 def test_task_status_values_are_stable() -> None:
@@ -161,6 +170,59 @@ def test_challenge_king_fk_points_at_kings_king_id() -> None:
     fk = next(iter(Challenge.__table__.c.king_id.foreign_keys))
     assert fk.column.table.name == "kings"
     assert fk.column.name == "king_id"
+
+
+def test_duel_task_solution_is_scoped_to_challenge() -> None:
+    cols = set(DuelTaskSolution.__table__.columns.keys())
+    assert "usage_summary" in cols
+    assert [c.name for c in DuelTaskSolution.__table__.primary_key.columns] == [
+        "task_id",
+        "challenger_submission_id",
+        "submission_id",
+    ]
+    fk_targets = {
+        (fk.parent.name, fk.column.table.name, fk.column.name)
+        for fk in DuelTaskSolution.__table__.foreign_keys
+    }
+    assert ("task_id", "tasks", "task_id") in fk_targets
+    assert (
+        "challenger_submission_id",
+        "challenges",
+        "challenger_submission_id",
+    ) in fk_targets
+    assert ("submission_id", "submissions", "submission_id") in fk_targets
+
+
+def test_duel_side_order_is_stable_and_varies_by_task() -> None:
+    first = _duel_side_order(
+        task_id="task-0",
+        king_submission_id="king",
+        challenger_submission_id="challenger",
+    )
+    assert first == _duel_side_order(
+        task_id="task-0",
+        king_submission_id="king",
+        challenger_submission_id="challenger",
+    )
+    orders = {
+        _duel_side_order(
+            task_id=f"task-{index}",
+            king_submission_id="king",
+            challenger_submission_id="challenger",
+        )
+        for index in range(32)
+    }
+    assert orders == {("king", "challenger"), ("challenger", "king")}
+
+
+def test_judgements_no_longer_reference_task_wide_solutions() -> None:
+    fk_tables = {
+        fk.column.table.name
+        for constraint in Judgement.__table__.foreign_key_constraints
+        for fk in constraint.elements
+    }
+    assert "task_solutions" not in fk_tables
+    assert {"tasks", "submissions", "challenges"} <= fk_tables
 
 
 def test_generator_db_is_importable() -> None:

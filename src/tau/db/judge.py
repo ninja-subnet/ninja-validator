@@ -29,10 +29,14 @@ class JudgeDb:
         await self._engine.dispose()
 
     async def pending_judge_requests(self) -> list[JudgeRequest]:
-        """King/challenger solution pairs awaiting a judgment, each with the task's
-        reference patch. Empty when there is nothing to judge."""
-        king_sol = aliased(models.TaskSolution)
-        chal_sol = aliased(models.TaskSolution)
+        """Fresh challenge-scoped solution pairs awaiting a judgment.
+
+        Empty when there is nothing to judge. The king side comes from
+        ``duel_task_solutions`` for this challenge, not the qualification-time
+        task-wide cache.
+        """
+        king_sol = aliased(models.DuelTaskSolution)
+        chal_sol = aliased(models.DuelTaskSolution)
         # The reigning king is the one with the latest king_from.
         reigning_king_id = (
             select(models.King.king_id)
@@ -55,9 +59,10 @@ class JudgeDb:
             .join(models.Task, models.Task.king_id == models.King.king_id)
             .join(
                 king_sol,
-                # kings.king_id holds the king's submission_id -> its own solution row.
                 and_(
                     king_sol.task_id == models.Task.task_id,
+                    king_sol.challenger_submission_id
+                    == models.Challenge.challenger_submission_id,
                     king_sol.submission_id == models.King.king_id,
                 ),
             )
@@ -65,6 +70,8 @@ class JudgeDb:
                 chal_sol,
                 and_(
                     chal_sol.task_id == models.Task.task_id,
+                    chal_sol.challenger_submission_id
+                    == models.Challenge.challenger_submission_id,
                     chal_sol.submission_id == models.Challenge.challenger_submission_id,
                 ),
             )

@@ -18,9 +18,12 @@ from __future__ import annotations
 import os
 from collections.abc import Mapping
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
-from tau.db.status import PoolType
 from tau.utils.env import env_int
+
+if TYPE_CHECKING:
+    from tau.db.status import PoolType
 
 
 @dataclass(frozen=True, slots=True)
@@ -36,11 +39,12 @@ class PoolTargets:
         if self.pool_two < 1:
             raise ValueError("pool_two target must be >= 1")
 
-    def target(self, pool: PoolType) -> int:
+    def target(self, pool: PoolType | int) -> int:
         """Target task count for *pool*."""
-        if pool is PoolType.POOL_ONE:
+        pool_value = int(pool)
+        if pool_value == 1:
             return self.pool_one
-        if pool is PoolType.POOL_TWO:
+        if pool_value == 2:
             return self.pool_two
         raise ValueError(f"unknown pool: {pool!r}")
 

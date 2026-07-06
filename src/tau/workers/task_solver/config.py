@@ -9,12 +9,13 @@ from __future__ import annotations
 
 import os
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
+from tau.pools import PoolTargets
 from tau.proxy import SolveBudget, UpstreamTarget
 from tau.sandbox import SandboxConfig
-from tau.utils.env import env_float, env_int, env_str
+from tau.utils.env import env_bool, env_float, env_int, env_str
 
 
 def _github_token(env: Mapping[str, str]) -> str | None:
@@ -42,6 +43,10 @@ class SolverConfig:
     poll_seconds: float = 30.0
     # The king must produce at least this many changed diff lines to QUALIFY a task.
     qualify_min_changed_lines: int = 1
+    # When true, duel solves wait until the active pool reaches its target of
+    # QUALIFIED tasks.
+    require_full_pool_for_duels: bool = False
+    pool_targets: PoolTargets = field(default_factory=PoolTargets)
 
     @classmethod
     def from_env(cls, environ: Mapping[str, str] | None = None) -> SolverConfig:
@@ -58,4 +63,10 @@ class SolverConfig:
             qualify_min_changed_lines=env_int(
                 env, "TAU_SOLVER_QUALIFY_MIN_CHANGED_LINES", d.qualify_min_changed_lines
             ),
+            require_full_pool_for_duels=env_bool(
+                env,
+                "TAU_SOLVER_REQUIRE_FULL_POOL_FOR_DUELS",
+                d.require_full_pool_for_duels,
+            ),
+            pool_targets=PoolTargets.from_env(env),
         )
