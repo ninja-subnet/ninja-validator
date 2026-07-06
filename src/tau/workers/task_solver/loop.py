@@ -46,6 +46,7 @@ from tau.sandbox import (
     clone_task_repo,
     run_agent_in_container,
 )
+from tau.sandbox.repo import CloneError
 
 from .config import SolverConfig
 
@@ -59,6 +60,7 @@ AGENT_ENTRYPOINT = "agent.py"
 # way persists nothing and is retried on a later tick. Everything else — including a bad
 # agent that crashes or returns an empty result — is a terminal outcome and is saved.
 _RETRYABLE_EXIT_REASONS = frozenset({EXIT_UPSTREAM_ERROR, EXIT_SANDBOX_ERROR})
+_TASK_SETUP_FAILED = "task_setup_failed"
 
 
 def _agent_dir(config: SolverConfig, submission_id: str) -> Path | None:
@@ -154,7 +156,11 @@ def _tick(
 ) -> int:
     cap = config.max_containers
     # Gather this tick's work (active duel first), capped at `cap` total.
-    duel_jobs = db.next_duel_jobs(cap)
+    duel_jobs = db.next_duel_jobs(
+        cap,
+        require_full_pool=config.require_full_pool_for_duels,
+        pool_targets=config.pool_targets,
+    )
     qual_jobs = (
         db.next_qualification_jobs(cap - len(duel_jobs))
         if len(duel_jobs) < cap
@@ -218,7 +224,31 @@ def _qualify(
         job.task_id,
         job.submission_id,
     )
-    result = _run(job, agent_dir, client=client, config=config, image_tag=image_tag)
+    try:
+        result = _run(job, agent_dir, client=client, config=config, image_tag=image_tag)
+    except CloneError as exc:
+        db.finish_qualification(
+            task_id=job.task_id,
+            king_submission_id=job.submission_id,
+            qualified=False,
+            solution="",
+            duration=0.0,
+            exit_reason=_TASK_SETUP_FAILED,
+        )
+        log.warning(
+            "qualification task=%s king=%s setup failed; marking DISQUALIFIED (%s)",
+            job.task_id,
+            job.submission_id,
+            exc,
+        )
+        get_axiom().exception(
+            "task-solver",
+            "qualification_task_setup_failed",
+            task_id=job.task_id,
+            submission_id=job.submission_id,
+            error=str(exc),
+        )
+        return
     _report_failure(phase="qualification", job=job, result=result)
     if result.exit_reason in _RETRYABLE_EXIT_REASONS:
         # Miner-unrelated infra fault (LLM upstream or sandbox/docker), not a verdict on

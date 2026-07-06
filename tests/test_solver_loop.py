@@ -22,6 +22,7 @@ from tau.sandbox import (
     EXIT_UPSTREAM_ERROR,
     AgentRunResult,
 )
+from tau.sandbox.repo import CloneError
 from tau.workers.task_solver import loop as loop_mod
 
 
@@ -113,7 +114,14 @@ def test_tick_prioritizes_duel_jobs_before_qualification(monkeypatch) -> None:
         duel_limit: int | None = None
         qualification_limit: int | None = None
 
-        def next_duel_jobs(self, limit: int) -> list[DuelSolveJob]:
+        def next_duel_jobs(
+            self,
+            limit: int,
+            *,
+            require_full_pool: bool = False,
+            pool_targets=None,
+        ) -> list[DuelSolveJob]:
+            _ = (require_full_pool, pool_targets)
             self.duel_limit = limit
             return duel_jobs[:limit]
 
@@ -132,7 +140,11 @@ def test_tick_prioritizes_duel_jobs_before_qualification(monkeypatch) -> None:
     ran = loop_mod._tick(
         db=db,
         client=None,
-        config=SimpleNamespace(max_containers=3),
+        config=SimpleNamespace(
+            max_containers=3,
+            require_full_pool_for_duels=False,
+            pool_targets=None,
+        ),
         image_tag="img",
         stop=threading.Event(),
     )
@@ -192,9 +204,38 @@ def test_duel_terminal_outcome_saves_solution(monkeypatch, result) -> None:
 class _FakeAxiom:
     def __init__(self) -> None:
         self.failures: list[dict] = []
+        self.exceptions: list[dict] = []
 
     def emit(self, severity, source, event_type, **kw) -> None:
         self.failures.append(kw)
+
+    def exception(self, source, event_type, **kw) -> None:
+        self.exceptions.append({"source": source, "event_type": event_type, **kw})
+
+
+def test_qualification_clone_error_disqualifies_task(monkeypatch) -> None:
+    fake = _FakeAxiom()
+    monkeypatch.setattr(loop_mod, "get_axiom", lambda: fake)
+    monkeypatch.setattr(loop_mod, "_agent_dir", lambda *a, **k: Path("/bundle"))
+
+    def raise_clone_error(*_args, **_kwargs):
+        raise CloneError("git checkout timed out after 300 seconds")
+
+    monkeypatch.setattr(loop_mod, "_run", raise_clone_error)
+    db, cfg = _FakeDb(), _config()
+    _qualify(db, cfg)
+
+    assert db.qualifications == [
+        {
+            "task_id": "t1",
+            "king_submission_id": "s1",
+            "qualified": False,
+            "solution": "",
+            "duration": 0.0,
+            "exit_reason": "task_setup_failed",
+        }
+    ]
+    assert fake.exceptions[0]["event_type"] == "qualification_task_setup_failed"
 
 
 def _usage(*, timeouts: int = 0, last: str | None = None) -> SimpleNamespace:

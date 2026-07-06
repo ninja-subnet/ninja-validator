@@ -17,24 +17,36 @@ from pathlib import Path
 log = logging.getLogger(__name__)
 
 _FULL_SHA = re.compile(r"^[0-9a-fA-F]{40}$")
+_AUTHED_URL = re.compile(r"https://[^/@\s]+:[^/@\s]+@")
 
 
 class CloneError(RuntimeError):
     """A git step failed while materializing a task repo."""
 
 
+def _redact_auth(text: str) -> str:
+    return _AUTHED_URL.sub("https://<redacted>@", text)
+
+
+def _git_command(args: list[str]) -> str:
+    return "git " + " ".join(_redact_auth(arg) for arg in args)
+
+
 def _git(args: list[str], *, cwd: Path | None = None, timeout: int = 300) -> str:
-    result = subprocess.run(
-        ["git", *args],
-        cwd=str(cwd) if cwd else None,
-        capture_output=True,
-        text=True,
-        timeout=timeout,
-        check=False,
-    )
+    try:
+        result = subprocess.run(
+            ["git", *args],
+            cwd=str(cwd) if cwd else None,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            check=False,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise CloneError(f"{_git_command(args)} timed out after {timeout} seconds") from exc
     if result.returncode != 0:
-        output = ((result.stdout or "") + (result.stderr or "")).strip()
-        raise CloneError(f"git {' '.join(args)} failed: {output[-500:]}")
+        output = _redact_auth(((result.stdout or "") + (result.stderr or "")).strip())
+        raise CloneError(f"{_git_command(args)} failed: {output[-500:]}")
     return result.stdout
 
 

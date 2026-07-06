@@ -18,3 +18,9 @@ build
 .pytest_cache
 .mypy_cache
 .claude
+
+# Local task/benchmark outputs; these can be very large and are runtime data,
+# not image inputs.
+workspace
+benchmark_results
+data

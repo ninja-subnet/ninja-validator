@@ -21,9 +21,11 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 
-from sqlalchemy import and_, or_, select, update
+from sqlalchemy import and_, case, func, or_, select, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.orm import aliased
+
+from tau.pools import PoolTargets
 
 from . import models
 from .engine import create_db_engine, session_factory, session_scope
@@ -145,15 +147,25 @@ class SolverDb:
             )
 
     # -- phase B: fresh duel solves ------------------------------------------
-    def next_duel_jobs(self, limit: int) -> list[DuelSolveJob]:
+    def next_duel_jobs(
+        self,
+        limit: int,
+        *,
+        require_full_pool: bool = False,
+        pool_targets: PoolTargets | None = None,
+    ) -> list[DuelSolveJob]:
         """Fresh king/challenger solves still missing for active challenge rounds.
 
         A row is scoped by ``(task_id, challenger_submission_id, submission_id)``.
         That means the king runs again for each challenger rather than reusing the
         qualification solve or a prior challenger's duel solve.
+        When ``require_full_pool`` is true, active challenge pools are ignored until
+        the matching pool has reached its configured count of QUALIFIED tasks.
         """
         if limit <= 0:
             return []
+        if pool_targets is None:
+            pool_targets = PoolTargets()
         king_sol = aliased(models.DuelTaskSolution)
         chal_sol = aliased(models.DuelTaskSolution)
         stmt = (
@@ -205,6 +217,23 @@ class SolverDb:
             )
             .limit(limit)
         )
+        if require_full_pool:
+            qualified_count = (
+                select(func.count(models.Task.task_id))
+                .where(
+                    models.Task.king_id == models.Challenge.king_id,
+                    models.Task.pool_type == models.Challenge.status,
+                    models.Task.status_id == int(TaskStatus.QUALIFIED),
+                )
+                .correlate(models.Challenge)
+                .scalar_subquery()
+            )
+            pool_target = case(
+                (models.Challenge.status == 1, pool_targets.pool_one),
+                (models.Challenge.status == 2, pool_targets.pool_two),
+                else_=pool_targets.pool_two,
+            )
+            stmt = stmt.where(qualified_count >= pool_target)
         with session_scope(self._sessions) as session:
             rows = session.execute(stmt).all()
         jobs: list[DuelSolveJob] = []

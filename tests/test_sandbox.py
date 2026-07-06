@@ -8,11 +8,14 @@ harness source, and the diff-line counter — is tested here.
 from __future__ import annotations
 
 import shutil
+import subprocess
 from pathlib import Path
+
+import pytest
 
 from tau.sandbox.harness import HARNESS_SCRIPT, RESULT_SENTINEL
 from tau.sandbox.network import _OWN_CONTAINER_ID
-from tau.sandbox.repo import _authed_url
+from tau.sandbox.repo import CloneError, _authed_url, _git
 from tau.sandbox.runner import _parse_result, _prepare_workdir
 from tau.sandbox.types import AgentRunRequest
 from tau.workers.task_solver.loop import _changed_lines
@@ -50,6 +53,27 @@ def test_authed_url_passes_through_without_token_or_credentials() -> None:
     # Already has credentials -> not double-injected.
     url = "https://user:pw@github.com/octo/repo.git"
     assert _authed_url(url, "ght") == url
+
+
+def test_git_timeout_is_clone_error_and_redacts_auth(monkeypatch) -> None:
+    def timeout(*args, **kwargs):  # noqa: ANN001
+        raise subprocess.TimeoutExpired(cmd=args[0], timeout=kwargs["timeout"])
+
+    monkeypatch.setattr("tau.sandbox.repo.subprocess.run", timeout)
+    with pytest.raises(CloneError) as exc:
+        _git(
+            [
+                "clone",
+                "https://x-access-token:supersecret@github.com/octo/repo.git",
+                "/tmp/repo",
+            ],
+            timeout=1,
+        )
+
+    message = str(exc.value)
+    assert "timed out after 1 seconds" in message
+    assert "supersecret" not in message
+    assert "https://<redacted>@github.com/octo/repo.git" in message
 
 
 def test_prepare_workdir_lays_out_bundle(tmp_path: Path) -> None:

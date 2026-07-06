@@ -587,6 +587,7 @@ authoritative, commented list). Grouped by concern:
 | `MAX_CONTAINERS` | `4` | Max concurrent sandboxes per tick (and per-tick batch size). |
 | `TAU_SOLVER_POLL_SECONDS` | `30` | Idle poll interval. |
 | `TAU_SOLVER_QUALIFY_MIN_CHANGED_LINES` | `1` | Min diff lines the king must change to QUALIFY a task. |
+| `TAU_SOLVER_REQUIRE_FULL_POOL_FOR_DUELS` | `false` | Wait until the active pool has target QUALIFIED tasks before scheduling duel solves. |
 | `TAU_SUBMISSIONS_DIR` | `submissions` | Host dir of extracted submissions (mounted read-only, same path). |
 | `TAU_SANDBOX_WORK_ROOT` | system temp | Host dir for per-solve work trees (**same path host↔container**). |
 | `SOLVER_MAX_REQUESTS` / `_TOTAL_TOKENS` / `_COST` / `_TOKENS_PER_REQUEST` | unbounded | Per-solve spend caps. **Strongly advised** — untrusted code drives the spend. |

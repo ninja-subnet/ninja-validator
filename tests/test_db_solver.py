@@ -26,6 +26,7 @@ from tau.db.models import (
     Task,
     TaskSolution,
 )
+from tau.pools import PoolTargets
 
 load_dotenv(Path(__file__).resolve().parent.parent / ".env")
 _TEST_URL = os.environ.get("TAU_TEST_DATABASE_URL")
@@ -235,6 +236,28 @@ def test_duel_jobs_returns_unsolved_king_and_challenger_for_active_challenge(
         ("t1", "sub-chal", "sub-chal"),
     ]
     assert jobs[0].base_commit == _PARENT
+
+
+def test_duel_jobs_can_wait_for_full_qualified_pool(db: SolverDb) -> None:
+    _seed_active_challenge(db)
+    targets = PoolTargets(pool_one=2, pool_two=2)
+
+    assert (
+        db.next_duel_jobs(10, require_full_pool=True, pool_targets=targets)
+        == []
+    )
+
+    def add_second_qualified(s):  # noqa: ANN001
+        _task(s, "t2", "king-1", pool_type=1, status_id=int(TaskStatus.QUALIFIED), fp="f4")
+
+    _seed(db, add_second_qualified)
+    jobs = db.next_duel_jobs(10, require_full_pool=True, pool_targets=targets)
+    assert [(j.task_id, j.submission_id, j.challenger_submission_id) for j in jobs] == [
+        ("t1", "king-1", "sub-chal"),
+        ("t1", "sub-chal", "sub-chal"),
+        ("t2", "king-1", "sub-chal"),
+        ("t2", "sub-chal", "sub-chal"),
+    ]
 
 
 def test_duel_jobs_excludes_each_already_solved_side(db: SolverDb) -> None:
