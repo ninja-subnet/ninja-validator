@@ -52,6 +52,8 @@ class Submission(Base):
     agent_files: Mapped[str | None] = mapped_column(Text)
     source: Mapped[str | None] = mapped_column(Text)
     status_id: Mapped[int | None] = mapped_column(Integer)
+    # First 16 hex of the agent bundle sha256, for duplicate detection.
+    agent_sha256_prefix: Mapped[str | None] = mapped_column(Text, index=True)
 
     king: Mapped[King | None] = relationship(back_populates="submission")
     qualification: Mapped[SubmissionQualification | None] = relationship(
