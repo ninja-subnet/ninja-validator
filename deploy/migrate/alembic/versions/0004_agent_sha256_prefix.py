@@ -1,7 +1,5 @@
 """add submissions.agent_sha256_prefix dedup key
 
-Revision ID: 0003_agent_sha256_prefix
-Revises: 0002_challenge_scoped_solutions
 Create Date: 2026-07-07
 """
 
@@ -10,8 +8,8 @@ from collections.abc import Sequence
 import sqlalchemy as sa
 from alembic import op
 
-revision: str = "0003_agent_sha256_prefix"
-down_revision: str | None = "0002_challenge_scoped_solutions"
+revision: str = "0004_agent_sha256_prefix"
+down_revision: str | None = "0003_duel_solution_usage_summary"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
