@@ -18,8 +18,10 @@ full ``database.py``, so it can ship independently.
 
 from __future__ import annotations
 
+import hashlib
 import logging
 from dataclasses import dataclass
+from typing import Any
 
 from sqlalchemy import and_, case, func, or_, select, update
 from sqlalchemy.dialects.postgresql import insert
@@ -215,7 +217,7 @@ class SolverDb:
                 models.Task.task_id,
                 models.Challenge.challenger_submission_id,
             )
-            .limit(limit)
+            .limit(limit * 2)
         )
         if require_full_pool:
             qualified_count = (
@@ -238,30 +240,21 @@ class SolverDb:
             rows = session.execute(stmt).all()
         jobs: list[DuelSolveJob] = []
         for row in rows:
-            if row.king_solution_task_id is None:
-                jobs.append(
-                    DuelSolveJob(
-                        task_id=row.task_id,
-                        submission_id=row.king_submission_id,
-                        challenger_submission_id=row.challenger_submission_id,
-                        problem_statement=row.problem_statement,
-                        repo_clone_url=row.repo_clone_url,
-                        base_commit=row.parent_sha,
-                    )
-                )
-            if len(jobs) >= limit:
-                break
-            if row.challenger_solution_task_id is None:
-                jobs.append(
-                    DuelSolveJob(
-                        task_id=row.task_id,
-                        submission_id=row.challenger_submission_id,
-                        challenger_submission_id=row.challenger_submission_id,
-                        problem_statement=row.problem_statement,
-                        repo_clone_url=row.repo_clone_url,
-                        base_commit=row.parent_sha,
-                    )
-                )
+            missing_king = row.king_solution_task_id is None
+            missing_challenger = row.challenger_solution_task_id is None
+            if missing_king and missing_challenger:
+                if len(jobs) + 2 > limit:
+                    continue
+                for side in _duel_side_order(
+                    task_id=row.task_id,
+                    king_submission_id=row.king_submission_id,
+                    challenger_submission_id=row.challenger_submission_id,
+                ):
+                    jobs.append(_duel_job_for_side(row, side=side))
+            elif missing_king and len(jobs) < limit:
+                jobs.append(_duel_job_for_side(row, side="king"))
+            elif missing_challenger and len(jobs) < limit:
+                jobs.append(_duel_job_for_side(row, side="challenger"))
             if len(jobs) >= limit:
                 break
         return jobs
@@ -327,3 +320,34 @@ class SolverDb:
                 )
                 .on_conflict_do_nothing(index_elements=["task_id", "submission_id"])
             )
+
+
+def _duel_side_order(
+    *,
+    task_id: str,
+    king_submission_id: str,
+    challenger_submission_id: str,
+) -> tuple[str, str]:
+    """Return a stable, roughly balanced side order for a duel task."""
+    key = "\0".join((challenger_submission_id, king_submission_id, task_id))
+    first_byte = hashlib.blake2b(key.encode("utf-8"), digest_size=1).digest()[0]
+    if first_byte % 2 == 0:
+        return ("king", "challenger")
+    return ("challenger", "king")
+
+
+def _duel_job_for_side(row: Any, *, side: str) -> DuelSolveJob:
+    if side == "king":
+        submission_id = row.king_submission_id
+    elif side == "challenger":
+        submission_id = row.challenger_submission_id
+    else:  # pragma: no cover - defensive only; callers use the two literals above.
+        raise ValueError(f"unknown duel side: {side}")
+    return DuelSolveJob(
+        task_id=row.task_id,
+        submission_id=submission_id,
+        challenger_submission_id=row.challenger_submission_id,
+        problem_statement=row.problem_statement,
+        repo_clone_url=row.repo_clone_url,
+        base_commit=row.parent_sha,
+    )

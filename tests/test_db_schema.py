@@ -5,6 +5,7 @@ from __future__ import annotations
 from sqlalchemy import CheckConstraint
 
 from tau.db import ChallengeStatus, GeneratorDb, PoolType, SubmissionStatus, TaskStatus
+from tau.db.solver import _duel_side_order
 from tau.db.models import (
     Challenge,
     DuelTaskSolution,
@@ -188,6 +189,28 @@ def test_duel_task_solution_is_scoped_to_challenge() -> None:
         "challenger_submission_id",
     ) in fk_targets
     assert ("submission_id", "submissions", "submission_id") in fk_targets
+
+
+def test_duel_side_order_is_stable_and_varies_by_task() -> None:
+    first = _duel_side_order(
+        task_id="task-0",
+        king_submission_id="king",
+        challenger_submission_id="challenger",
+    )
+    assert first == _duel_side_order(
+        task_id="task-0",
+        king_submission_id="king",
+        challenger_submission_id="challenger",
+    )
+    orders = {
+        _duel_side_order(
+            task_id=f"task-{index}",
+            king_submission_id="king",
+            challenger_submission_id="challenger",
+        )
+        for index in range(32)
+    }
+    assert orders == {("king", "challenger"), ("challenger", "king")}
 
 
 def test_judgements_no_longer_reference_task_wide_solutions() -> None:
