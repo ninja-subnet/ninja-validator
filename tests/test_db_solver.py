@@ -324,3 +324,60 @@ def test_save_duel_task_solution_is_idempotent(db: SolverDb) -> None:
     with session_scope(session_factory(db._engine)) as session:  # noqa: SLF001
         rows = session.scalars(select(DuelTaskSolution)).all()
     assert len(rows) == 1
+
+
+def test_save_duel_task_solution_keeps_only_safe_usage_summary(db: SolverDb) -> None:
+    _seed_active_challenge(db)
+    db.save_duel_task_solution(
+        task_id="t1",
+        challenger_submission_id="sub-chal",
+        submission_id="sub-chal",
+        solution="diff",
+        duration=1.0,
+        exit_reason="completed",
+        usage_summary={
+            "request_count": 1,
+            "prompt_tokens": 10,
+            "completion_tokens": 5,
+            "total_tokens": 15,
+            "cost": 0.0,
+            "last_upstream_error": "internal-upstream.invalid do-not-publish marker",
+            "requests": [
+                {
+                    "method": "POST",
+                    "path": "http://internal-upstream.invalid/v1/chat/completions",
+                    "status_code": 200,
+                    "latency_ms": 250,
+                    "prompt_tokens": 10,
+                    "completion_tokens": 5,
+                    "total_tokens": 15,
+                    "error": "do-not-publish marker from internal-upstream.invalid",
+                }
+            ],
+        },
+    )
+
+    with session_scope(session_factory(db._engine)) as session:  # noqa: SLF001
+        row = session.scalars(select(DuelTaskSolution)).one()
+
+    assert row.usage_summary == {
+        "request_count": 1,
+        "prompt_tokens": 10,
+        "completion_tokens": 5,
+        "total_tokens": 15,
+        "requests": [
+            {
+                "index": 0,
+                "method": "POST",
+                "status_code": 200,
+                "latency_ms": 250,
+                "prompt_tokens": 10,
+                "completion_tokens": 5,
+                "total_tokens": 15,
+            }
+        ],
+    }
+    encoded = str(row.usage_summary)
+    assert "internal-upstream.invalid" not in encoded
+    assert "do-not-publish marker" not in encoded
+    assert "chat/completions" not in encoded

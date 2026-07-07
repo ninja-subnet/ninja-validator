@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
 
@@ -268,6 +269,7 @@ class SolverDb:
         solution: str,
         duration: float,
         exit_reason: str,
+        usage_summary: Mapping[str, Any] | None = None,
     ) -> None:
         """Insert a fresh challenge-scoped solution row.
 
@@ -284,6 +286,7 @@ class SolverDb:
                     solution=solution,
                     duration=duration,
                     exit_reason=exit_reason,
+                    usage_summary=_sanitize_usage_summary(usage_summary),
                 )
                 .on_conflict_do_nothing(
                     index_elements=[
@@ -351,3 +354,110 @@ def _duel_job_for_side(row: Any, *, side: str) -> DuelSolveJob:
         repo_clone_url=row.repo_clone_url,
         base_commit=row.parent_sha,
     )
+
+
+def _sanitize_usage_summary(
+    usage_summary: Mapping[str, Any] | None,
+) -> dict[str, Any] | None:
+    """Persist only infrastructure-safe solve telemetry.
+
+    The proxy can observe richer request state, but the DB should never retain raw
+    bodies, headers, upstream URLs, error strings, API keys, or server addresses.
+    """
+    if not usage_summary:
+        return None
+    output: dict[str, Any] = {}
+    int_keys = (
+        "request_count",
+        "rejected_request_count",
+        "first_token_count",
+        "success_count",
+        "error_count",
+        "upstream_error_count",
+        "upstream_timeout_count",
+        "prompt_tokens",
+        "completion_tokens",
+        "total_tokens",
+        "cached_tokens",
+        "cache_write_tokens",
+        "reasoning_tokens",
+    )
+    for key in int_keys:
+        value = _int_or_none(usage_summary.get(key))
+        if value is not None:
+            output[key] = value
+
+    requests = usage_summary.get("requests")
+    observed_request_cost = (
+        any(
+            isinstance(raw, Mapping) and _float_or_none(raw.get("cost")) is not None
+            for raw in requests
+        )
+        if isinstance(requests, list)
+        else False
+    )
+    cost = _float_or_none(usage_summary.get("cost"))
+    if cost is not None and (cost != 0.0 or observed_request_cost):
+        output["cost"] = cost
+
+    budget_reason = usage_summary.get("budget_exceeded_reason")
+    if budget_reason is not None:
+        output["budget_exceeded_reason"] = str(budget_reason)[:120]
+
+    if isinstance(requests, list):
+        output["requests"] = [
+            request
+            for index, raw in enumerate(requests)
+            if (request := _sanitize_request_record(raw, index=index)) is not None
+        ]
+    return output or None
+
+
+def _sanitize_request_record(raw: object, *, index: int) -> dict[str, Any] | None:
+    if not isinstance(raw, Mapping):
+        return None
+    output: dict[str, Any] = {"index": index}
+    method = raw.get("method")
+    if method is not None:
+        method_text = str(method).upper()
+        if method_text in {"GET", "POST", "PUT", "PATCH", "DELETE"}:
+            output["method"] = method_text
+    for key in (
+        "status_code",
+        "latency_ms",
+        "first_token_latency_ms",
+        "prompt_tokens",
+        "completion_tokens",
+        "total_tokens",
+        "cached_tokens",
+        "cache_write_tokens",
+        "reasoning_tokens",
+    ):
+        value = _int_or_none(raw.get(key))
+        if value is not None:
+            output[key] = value
+    cost = _float_or_none(raw.get("cost"))
+    if cost is not None:
+        output["cost"] = cost
+    rejected = raw.get("rejected")
+    if rejected is not None:
+        output["rejected"] = bool(rejected)
+    return output
+
+
+def _int_or_none(value: object) -> int | None:
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _float_or_none(value: object) -> float | None:
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None

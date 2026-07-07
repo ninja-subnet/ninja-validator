@@ -178,6 +178,8 @@ def test_duel_task_solution_is_scoped_to_challenge() -> None:
         "challenger_submission_id",
         "submission_id",
     ]
+    assert "usage_summary" in DuelTaskSolution.__table__.columns
+    assert DuelTaskSolution.__table__.c.usage_summary.nullable is True
     fk_targets = {
         (fk.parent.name, fk.column.table.name, fk.column.name)
         for fk in DuelTaskSolution.__table__.foreign_keys

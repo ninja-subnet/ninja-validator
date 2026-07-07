@@ -27,6 +27,7 @@ from sqlalchemy import (
     UniqueConstraint,
     func,
 )
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 from .status import ChallengeStatus, DuelOutcome, PoolType, SubmissionStatus, TaskStatus
@@ -374,6 +375,7 @@ class DuelTaskSolution(Base):
     solution: Mapped[str | None] = mapped_column(Text)
     duration: Mapped[float | None] = mapped_column(Float)
     exit_reason: Mapped[str | None] = mapped_column(Text)
+    usage_summary: Mapped[dict | None] = mapped_column(JSONB)
 
     task: Mapped[Task] = relationship(back_populates="duel_solutions")
 

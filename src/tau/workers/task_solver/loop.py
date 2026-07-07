@@ -349,6 +349,7 @@ def _solve_duel(
         solution=result.solution_diff,
         duration=result.elapsed_seconds,
         exit_reason=result.exit_reason,
+        usage_summary=result.usage.to_dict() if result.usage is not None else None,
     )
     log.info(
         "duel solve task=%s challenge=%s submission=%s exit=%s success=%s",

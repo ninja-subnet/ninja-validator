@@ -200,6 +200,24 @@ def test_duel_terminal_outcome_saves_solution(monkeypatch, result) -> None:
     assert db.duel_solutions[0]["challenger_submission_id"] == "c1"
 
 
+def test_duel_solution_saves_usage_summary(monkeypatch) -> None:
+    usage = SimpleNamespace(to_dict=lambda: {"request_count": 1, "total_tokens": 42})
+    result = AgentRunResult(
+        success=True,
+        solution_diff="+added\n",
+        exit_reason=EXIT_COMPLETED,
+        elapsed_seconds=1.0,
+        usage=usage,
+    )
+    _stub_run(monkeypatch, result)
+    db, cfg = _FakeDb(), _config()
+    _duel(db, cfg)
+    assert db.duel_solutions[0]["usage_summary"] == {
+        "request_count": 1,
+        "total_tokens": 42,
+    }
+
+
 # -- Axiom failure routing (_report_failure) ---------------------------------
 class _FakeAxiom:
     def __init__(self) -> None:
