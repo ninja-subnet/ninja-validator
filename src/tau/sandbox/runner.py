@@ -29,6 +29,7 @@ import json
 import logging
 import os
 import shutil
+import subprocess
 import tempfile
 import threading
 import time
@@ -61,7 +62,9 @@ from .network import (
 from .types import (
     EXIT_AGENT_ERROR,
     EXIT_COMPLETED,
+    EXIT_NO_ACTIVITY,
     EXIT_SANDBOX_ERROR,
+    EXIT_TIME_LIMIT,
     EXIT_UPSTREAM_ERROR,
     AgentRunRequest,
     AgentRunResult,
@@ -168,6 +171,30 @@ def run_agent_in_container(
             )
             exit_reason = EXIT_UPSTREAM_ERROR
             success = False
+        # A watchdog kill discards the harness result line, but the agent's edits are
+        # still on the host in the bind-mounted work tree. Salvage the real git diff
+        # (same tracked+untracked diff the harness itself would have emitted) so the
+        # judge scores the work that was actually produced instead of an automatic
+        # empty solution — otherwise a wall-clock kill against a near-finished
+        # opponent swings a duel task by a full point on scheduling luck alone. The
+        # tree may be mid-write at kill time; a torn diff scores low, which is still
+        # strictly fairer than nothing. exit_reason/success are left as the kill.
+        elif exit_reason in (EXIT_TIME_LIMIT, EXIT_NO_ACTIVITY) and workdir is not None:
+            patch = _salvage_repo_diff(workdir / "repo")
+            if patch.strip():
+                log.info(
+                    "task %s: salvaged %d-byte partial patch from %s work tree",
+                    req.task_id,
+                    len(patch),
+                    exit_reason,
+                )
+                get_axiom().info(
+                    source="task-solver",
+                    event_type="timeout_patch_salvaged",
+                    task_id=req.task_id,
+                    exit_reason=exit_reason,
+                    patch_bytes=len(patch),
+                )
         return AgentRunResult(
             success=success,
             solution_diff=patch,
@@ -262,6 +289,47 @@ def _prepare_workdir(req: AgentRunRequest) -> Path:
     (workdir / "task.txt").write_text(req.problem_statement, encoding="utf-8")
     (workdir / "harness.py").write_text(HARNESS_SCRIPT, encoding="utf-8")
     return workdir
+
+
+def _salvage_git(args: list[str], cwd: Path) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(  # noqa: S603 — fixed argv, no shell
+        ["git", "-c", "safe.directory=*", *args],
+        cwd=str(cwd),
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=False,
+    )
+
+
+def _salvage_repo_diff(repo_dir: Path) -> str:
+    """Best-effort git diff (tracked + untracked) of a killed solve's work tree.
+
+    Host-side twin of the harness's ``_repo_diff`` for runs the watchdog killed
+    before the harness could emit its result line. Never raises: any git failure
+    (missing tree, torn ``.git``, timeout) degrades to the empty diff the caller
+    would have used anyway.
+    """
+    try:
+        if not (repo_dir / ".git").exists():
+            return ""
+        diff = _salvage_git(["diff", "--binary", "--", "."], repo_dir).stdout or ""
+        untracked = (
+            _salvage_git(
+                ["ls-files", "--others", "--exclude-standard", "-z"], repo_dir
+            ).stdout
+            or ""
+        )
+        for rel in [item for item in untracked.split("\0") if item]:
+            file_diff = _salvage_git(
+                ["diff", "--binary", "--no-index", "--", "/dev/null", rel], repo_dir
+            )
+            if file_diff.returncode in (0, 1):
+                diff += file_diff.stdout or ""
+        return diff
+    except Exception:  # noqa: BLE001 — salvage is opportunistic, never fatal
+        log.warning("failed to salvage work-tree diff from %s", repo_dir, exc_info=True)
+        return ""
 
 
 def _exec_harness(

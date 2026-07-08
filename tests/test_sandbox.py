@@ -24,6 +24,7 @@ from tau.sandbox.runner import (
     _deterministic_agent_env,
     _parse_result,
     _prepare_workdir,
+    _salvage_repo_diff,
     _task_sampling_params,
     _task_seed,
 )
@@ -135,6 +136,49 @@ def test_prepare_workdir_preserves_repo_symlinks(tmp_path: Path) -> None:
         assert copied_dangling.readlink() == Path("missing.py")
     finally:
         shutil.rmtree(workdir, ignore_errors=True)
+
+
+def _init_git_repo(repo: Path) -> None:
+    repo.mkdir()
+    for args in (
+        ["init", "-q"],
+        ["config", "user.email", "test@test"],
+        ["config", "user.name", "test"],
+    ):
+        subprocess.run(["git", "-C", str(repo), *args], check=True)
+
+
+def test_salvage_repo_diff_captures_tracked_and_untracked(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    _init_git_repo(repo)
+    (repo / "main.py").write_text("print('hi')\n")
+    subprocess.run(["git", "-C", str(repo), "add", "-A"], check=True)
+    subprocess.run(
+        ["git", "-C", str(repo), "commit", "-qm", "base"],
+        check=True,
+        env={**os.environ, "GIT_AUTHOR_DATE": "2000-01-01T00:00:00", "GIT_COMMITTER_DATE": "2000-01-01T00:00:00"},
+    )
+    # The mid-solve state a watchdog kill leaves behind: a tracked edit + a new file.
+    (repo / "main.py").write_text("print('fixed')\n")
+    (repo / "new_module.py").write_text("VALUE = 1\n")
+
+    diff = _salvage_repo_diff(repo)
+
+    assert "print('fixed')" in diff
+    assert "new_module.py" in diff
+    assert "VALUE = 1" in diff
+
+
+def test_salvage_repo_diff_is_empty_when_clean_or_not_a_repo(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    _init_git_repo(repo)
+    assert _salvage_repo_diff(repo) == ""
+
+    plain = tmp_path / "plain"
+    plain.mkdir()
+    (plain / "file.py").write_text("x = 1\n")
+    assert _salvage_repo_diff(plain) == ""
+    assert _salvage_repo_diff(tmp_path / "missing") == ""
 
 
 def test_task_seed_is_stable_unique_and_json_safe() -> None:
