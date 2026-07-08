@@ -305,3 +305,36 @@ def test_report_failure_unrecognized_is_generic(monkeypatch) -> None:
 def test_report_failure_noop_on_completion(monkeypatch) -> None:
     fake = _report(monkeypatch, _res(EXIT_COMPLETED))
     assert fake.failures == []
+
+
+def _run_loop_and_capture_waits(monkeypatch, *, ran: int, ticks: int) -> list[float]:
+    """Drive ``run`` with a stubbed ``_tick`` returning *ran*; record sleep lengths."""
+    waits: list[float] = []
+    stop = threading.Event()
+
+    def fake_wait(seconds: float) -> bool:
+        waits.append(seconds)
+        if len(waits) >= ticks:
+            stop.set()
+        return stop.is_set()
+
+    monkeypatch.setattr(loop_mod, "_tick", lambda **_kw: ran)
+    stop.wait = fake_wait  # type: ignore[method-assign]
+    loop_mod.run(
+        db=object(),
+        client=None,
+        config=SimpleNamespace(max_containers=4, poll_seconds=30.0),
+        image_tag="img",
+        stop=stop,
+    )
+    return waits
+
+
+def test_run_uses_backlog_poll_when_tick_saturates(monkeypatch) -> None:
+    waits = _run_loop_and_capture_waits(monkeypatch, ran=4, ticks=2)
+    assert waits == [loop_mod.BACKLOG_POLL_SECONDS, loop_mod.BACKLOG_POLL_SECONDS]
+
+
+def test_run_uses_idle_poll_when_tick_is_partial_or_idle(monkeypatch) -> None:
+    assert _run_loop_and_capture_waits(monkeypatch, ran=0, ticks=1) == [30.0]
+    assert _run_loop_and_capture_waits(monkeypatch, ran=3, ticks=1) == [30.0]

@@ -55,6 +55,10 @@ log = logging.getLogger(__name__)
 # Entry file every submission bundle must expose (the validator agent contract).
 AGENT_ENTRYPOINT = "agent.py"
 
+# Sleep after a tick that filled ``max_containers`` (backlog likely remains), so a
+# solve backlog drains between batches without waiting the full ``poll_seconds``.
+BACKLOG_POLL_SECONDS = 1.0
+
 # Miner-unrelated infrastructure faults: the LLM upstream (unreachable / timeout / out of
 # funds / rate limit / provider 5xx) or the sandbox/docker layer. A solve that ends this
 # way persists nothing and is retried on a later tick. Everything else — including a bad
@@ -137,13 +141,18 @@ def run(
     image_tag: str,
     stop: threading.Event,
 ) -> None:
-    """Run ticks until *stop* is set, sleeping ``poll_seconds`` between them."""
+    """Run ticks until *stop* is set: ``poll_seconds`` between idle/partial ticks,
+    ``BACKLOG_POLL_SECONDS`` after a saturated one."""
     while not stop.is_set():
+        ran = 0
         try:
-            _tick(db=db, client=client, config=config, image_tag=image_tag, stop=stop)
+            ran = _tick(db=db, client=client, config=config, image_tag=image_tag, stop=stop)
         except Exception:  # noqa: BLE001 — one bad tick must not kill the worker
             log.exception("solver tick failed")
-        stop.wait(config.poll_seconds)
+        # A saturated tick means backlog likely remains: re-poll almost
+        # immediately instead of paying the idle interval between batches.
+        saturated = ran >= config.max_containers
+        stop.wait(BACKLOG_POLL_SECONDS if saturated else config.poll_seconds)
 
 
 def _tick(
