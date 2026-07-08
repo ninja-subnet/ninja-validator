@@ -36,11 +36,17 @@ static pthread_mutex_t g_lock = PTHREAD_MUTEX_INITIALIZER;
 static struct dirent *(*real_readdir)(DIR *) = NULL;
 static struct dirent64 *(*real_readdir64)(DIR *) = NULL;
 static int (*real_closedir)(DIR *) = NULL;
+static void (*real_rewinddir)(DIR *) = NULL;
+static void (*real_seekdir)(DIR *, long) = NULL;
+static long (*real_telldir)(DIR *) = NULL;
 
 static void ensure_syms(void) {
     if (!real_readdir) real_readdir = (struct dirent *(*)(DIR *))dlsym(RTLD_NEXT, "readdir");
     if (!real_readdir64) real_readdir64 = (struct dirent64 *(*)(DIR *))dlsym(RTLD_NEXT, "readdir64");
     if (!real_closedir) real_closedir = (int (*)(DIR *))dlsym(RTLD_NEXT, "closedir");
+    if (!real_rewinddir) real_rewinddir = (void (*)(DIR *))dlsym(RTLD_NEXT, "rewinddir");
+    if (!real_seekdir) real_seekdir = (void (*)(DIR *, long))dlsym(RTLD_NEXT, "seekdir");
+    if (!real_telldir) real_telldir = (long (*)(DIR *))dlsym(RTLD_NEXT, "telldir");
 }
 
 static int ent_cmp(const void *a, const void *b) {
@@ -131,6 +137,50 @@ struct dirent64 *readdir64(DIR *d) {
     ret = (s->pos < s->count) ? (struct dirent64 *)s->ents[s->pos++] : NULL;
     pthread_mutex_unlock(&g_lock);
     return ret;
+}
+
+void rewinddir(DIR *d) {
+    stream_t *s;
+    ensure_syms();
+    pthread_mutex_lock(&g_lock);
+    s = slot_for(d, 0);
+    if (s && s->loaded) {
+        s->pos = 0;
+        pthread_mutex_unlock(&g_lock);
+        return;
+    }
+    pthread_mutex_unlock(&g_lock);
+    if (real_rewinddir) real_rewinddir(d);
+}
+
+void seekdir(DIR *d, long loc) {
+    stream_t *s;
+    ensure_syms();
+    pthread_mutex_lock(&g_lock);
+    s = slot_for(d, 0);
+    if (s && s->loaded) {
+        if (loc < 0) loc = 0;
+        s->pos = (size_t)loc > s->count ? s->count : (size_t)loc;
+        pthread_mutex_unlock(&g_lock);
+        return;
+    }
+    pthread_mutex_unlock(&g_lock);
+    if (real_seekdir) real_seekdir(d, loc);
+}
+
+long telldir(DIR *d) {
+    stream_t *s;
+    long pos;
+    ensure_syms();
+    pthread_mutex_lock(&g_lock);
+    s = slot_for(d, 0);
+    if (s && s->loaded) {
+        pos = (long)s->pos;
+        pthread_mutex_unlock(&g_lock);
+        return pos;
+    }
+    pthread_mutex_unlock(&g_lock);
+    return real_telldir ? real_telldir(d) : -1;
 }
 
 int closedir(DIR *d) {
