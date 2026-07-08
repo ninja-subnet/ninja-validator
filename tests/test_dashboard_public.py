@@ -4,13 +4,14 @@ import json
 from sqlalchemy import create_engine, text
 from sqlalchemy.orm import Session
 
-from tau.db.status import PoolType, SubmissionStatus
+from tau.db.status import PoolType, SubmissionStatus, TaskStatus
 from tau.pools import PoolTargets
 from tau.dashboard.public import (
     DashboardConfig,
     PublicDashboard,
     _assemble_payload,
     _active_rounds,
+    _duel_score_round_rows,
     _freshness_from_timestamp,
     _king_pool_summaries,
     _public_duel_id,
@@ -178,6 +179,86 @@ def test_active_rounds_render_in_judgement_arrival_order() -> None:
         {"round": 1, "task_name": "result 01", "winner": "challenger"},
         {"round": 2, "task_name": "result 02", "winner": "king"},
         {"round": 3, "task_name": "result 03", "winner": "pending"},
+    ]
+
+
+def test_duel_score_round_rows_use_public_task_order_not_judgement_arrival() -> None:
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    with Session(engine) as session:
+        session.execute(
+            text(
+                """
+                CREATE TABLE tasks (
+                    task_id TEXT PRIMARY KEY,
+                    king_id TEXT NOT NULL,
+                    pool_type INTEGER NOT NULL,
+                    status_id INTEGER NOT NULL,
+                    created_at TEXT NOT NULL
+                )
+                """
+            )
+        )
+        session.execute(
+            text(
+                """
+                CREATE TABLE judgements (
+                    task_id TEXT NOT NULL,
+                    king_submission_id TEXT NOT NULL,
+                    challenger_submission_id TEXT NOT NULL,
+                    llm_winner TEXT,
+                    king_score REAL,
+                    challenger_score REAL,
+                    error TEXT,
+                    created_at TEXT NOT NULL
+                )
+                """
+            )
+        )
+        session.execute(
+            text(
+                """
+                INSERT INTO tasks VALUES
+                    ('task-1', 'king', 1, :qualified, '2026-07-03T00:00:01Z'),
+                    ('task-2', 'king', 1, :qualified, '2026-07-03T00:00:02Z'),
+                    ('task-3', 'king', 1, :qualified, '2026-07-03T00:00:03Z'),
+                    ('task-4', 'king', 2, :qualified, '2026-07-03T00:00:04Z')
+                """
+            ),
+            {"qualified": int(TaskStatus.QUALIFIED)},
+        )
+        session.execute(
+            text(
+                """
+                INSERT INTO judgements VALUES
+                    ('task-3', 'king', 'challenger', 'tie', 0.5, 0.5, NULL, '2026-07-03T00:00:10Z'),
+                    ('task-1', 'king', 'challenger', 'king', 0.9, 0.1, NULL, '2026-07-03T00:00:11Z'),
+                    ('task-4', 'king', 'challenger', 'challenger', 0.1, 0.9, NULL, '2026-07-03T00:00:12Z'),
+                    ('task-2', 'king', 'challenger', 'challenger', 0.2, 0.8, NULL, '2026-07-03T00:00:13Z')
+                """
+            )
+        )
+
+        rows = _duel_score_round_rows(
+            session,
+            king_id="king",
+            challenger_id="challenger",
+            targets=PoolTargets(pool_one=3, pool_two=1),
+        )
+
+    assert [
+        (
+            row["public_round"],
+            row["pool_round"],
+            row["llm_winner"],
+            row["king_score"],
+            row["challenger_score"],
+        )
+        for row in rows
+    ] == [
+        (1, 1, "king", 0.9, 0.1),
+        (2, 2, "challenger", 0.2, 0.8),
+        (3, 3, "tie", 0.5, 0.5),
+        (4, 1, "challenger", 0.1, 0.9),
     ]
 
 

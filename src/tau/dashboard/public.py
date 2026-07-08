@@ -1148,37 +1148,16 @@ def _duel_score_notes(session: Session, *, duel_id: int) -> dict[str, Any] | Non
     if row is None:
         return None
 
-    round_rows = session.execute(
-        text(
-            """
-            SELECT
-                t.pool_type,
-                j.llm_winner,
-                j.king_score,
-                j.challenger_score,
-                j.error IS NOT NULL AS judge_error,
-                j.created_at
-            FROM judgements j
-            JOIN tasks t
-              ON t.task_id = j.task_id
-             AND t.king_id = :king_id
-            WHERE j.king_submission_id = :king_id
-              AND j.challenger_submission_id = :challenger_id
-            ORDER BY t.pool_type, j.created_at, j.task_id
-            LIMIT 120
-            """
-        ),
-        {
-            "king_id": row["king_id"],
-            "challenger_id": row["challenger_submission_id"],
-        },
-    ).mappings()
+    round_rows = _duel_score_round_rows(
+        session,
+        king_id=row["king_id"],
+        challenger_id=row["challenger_submission_id"],
+        targets=PoolTargets.from_env(os.environ),
+    )
 
-    pool_counts: dict[int, int] = {}
     rounds: list[dict[str, Any]] = []
-    for index, round_row in enumerate(round_rows, start=1):
+    for round_row in round_rows:
         pool = int(round_row["pool_type"])
-        pool_counts[pool] = pool_counts.get(pool, 0) + 1
         king_score = _float_or_none(round_row["king_score"])
         challenger_score = _float_or_none(round_row["challenger_score"])
         delta = (
@@ -1186,10 +1165,10 @@ def _duel_score_notes(session: Session, *, duel_id: int) -> dict[str, Any] | Non
             if king_score is not None and challenger_score is not None
             else None
         )
-        pool_round = pool_counts[pool]
+        pool_round = int(round_row["pool_round"])
         rounds.append(
             {
-                "round": index,
+                "round": int(round_row["public_round"]),
                 "pool_id": pool,
                 "pool_name": _pool_name(pool),
                 "pool_label": _pool_label(pool),
@@ -1242,6 +1221,78 @@ def _duel_score_notes(session: Session, *, duel_id: int) -> dict[str, Any] | Non
         "challenger_repo_url": challenger_url,
         "rounds": rounds,
     }
+
+
+def _duel_score_round_rows(
+    session: Session,
+    *,
+    king_id: str,
+    challenger_id: str,
+    targets: PoolTargets,
+) -> list[Mapping[str, Any]]:
+    return list(
+        session.execute(
+            text(
+                """
+                WITH ranked_tasks AS (
+                    SELECT
+                        t.task_id,
+                        t.pool_type,
+                        row_number() OVER (
+                            PARTITION BY t.pool_type
+                            ORDER BY t.created_at, t.task_id
+                        ) AS pool_round
+                    FROM tasks t
+                    WHERE t.king_id = :king_id
+                      AND t.pool_type IN (:pool_one, :pool_two)
+                      AND t.status_id <> :disqualified
+                ),
+                public_tasks AS (
+                    SELECT
+                        task_id,
+                        pool_type,
+                        pool_round,
+                        CASE
+                            WHEN pool_type = :pool_one THEN pool_round
+                            ELSE :pool_one_target + pool_round
+                        END AS public_round
+                    FROM ranked_tasks
+                    WHERE (
+                        pool_type = :pool_one
+                        AND pool_round <= :pool_one_target
+                    ) OR (
+                        pool_type = :pool_two
+                        AND pool_round <= :pool_two_target
+                    )
+                )
+                SELECT
+                    t.public_round,
+                    t.pool_type,
+                    t.pool_round,
+                    j.llm_winner,
+                    j.king_score,
+                    j.challenger_score,
+                    j.error IS NOT NULL AS judge_error,
+                    j.created_at
+                FROM public_tasks t
+                JOIN judgements j
+                  ON j.task_id = t.task_id
+                 AND j.king_submission_id = :king_id
+                 AND j.challenger_submission_id = :challenger_id
+                ORDER BY t.public_round
+                """
+            ),
+            {
+                "king_id": king_id,
+                "challenger_id": challenger_id,
+                "pool_one": int(PoolType.POOL_ONE),
+                "pool_two": int(PoolType.POOL_TWO),
+                "pool_one_target": targets.pool_one,
+                "pool_two_target": targets.pool_two,
+                "disqualified": int(TaskStatus.DISQUALIFIED),
+            },
+        ).mappings()
+    )
 
 
 def _duel_solution_artifact(
