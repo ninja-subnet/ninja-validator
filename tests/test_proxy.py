@@ -12,7 +12,11 @@ import httpx
 import pytest
 
 from tau.proxy import REQUEST_LIMIT_EXIT_REASON, LLMProxy, SolveBudget, UpstreamTarget
-from tau.proxy.routing import SMART_UPSTREAM_ROUTER, SmartUpstreamRouter
+from tau.proxy.routing import (
+    SMART_UPSTREAM_ROUTER,
+    DisabledUpstreamStore,
+    SmartUpstreamRouter,
+)
 from tau.proxy.upstream import HttpxUpstreamClient, UpstreamClient, UpstreamResponse
 from tau.sandbox.config import SandboxConfig
 
@@ -144,6 +148,40 @@ def test_custom_upstream_from_env_accepts_multiple_base_urls() -> None:
     assert upstream.base_url == "http://10.0.0.5:8000"
     assert upstream.base_urls == ("http://10.0.0.5:8000", "http://10.0.0.5:8001")
     assert upstream.endpoint_count == 2
+
+
+def test_upstream_from_env_filters_disabled_base_urls(tmp_path) -> None:
+    disabled_file = tmp_path / "disabled-upstreams.txt"
+    disabled_file.write_text("http://10.0.0.5:8001/v1\n", encoding="utf-8")
+
+    upstream = UpstreamTarget.from_env(
+        {
+            "LLM_PROVIDER": "custom",
+            "LLM_UPSTREAM_BASE_URLS": (
+                "http://10.0.0.5:8000/v1, http://10.0.0.5:8001/v1"
+            ),
+            "LLM_UPSTREAM_API_KEY": "LOCAL-KEY",
+            "TAU_SOLVER_DISABLED_UPSTREAMS_FILE": str(disabled_file),
+        }
+    )
+
+    assert upstream.base_urls == ("http://10.0.0.5:8000",)
+    assert upstream.endpoint_count == 1
+
+
+def test_upstream_from_env_errors_when_all_urls_are_disabled(tmp_path) -> None:
+    disabled_file = tmp_path / "disabled-upstreams.txt"
+    disabled_file.write_text("http://10.0.0.5:8000/v1\n", encoding="utf-8")
+
+    with pytest.raises(OSError, match="all configured solver upstream endpoints"):
+        UpstreamTarget.from_env(
+            {
+                "LLM_PROVIDER": "custom",
+                "LLM_UPSTREAM_BASE_URLS": "http://10.0.0.5:8000/v1",
+                "LLM_UPSTREAM_API_KEY": "LOCAL-KEY",
+                "TAU_SOLVER_DISABLED_UPSTREAMS_FILE": str(disabled_file),
+            }
+        )
 
 
 def test_proxy_round_robins_multiple_upstream_urls() -> None:
@@ -329,6 +367,43 @@ def test_router_affinity_is_remembered_after_sticky_choice() -> None:
         assert third == first
     finally:
         router.release(third)
+
+
+def test_router_permanently_disables_endpoint_after_max_cooldown(tmp_path) -> None:
+    store = DisabledUpstreamStore(tmp_path / "disabled-upstreams.txt")
+    router = SmartUpstreamRouter(disabled_store=store)
+    urls = ("http://10.0.0.5:8000", "http://10.0.0.5:8001")
+
+    for _ in range(4):
+        router.record_result(
+            "http://10.0.0.5:8000",
+            status_code=503,
+            error="boom",
+            base_urls=urls,
+        )
+
+    assert store.load() == {"http://10.0.0.5:8000"}
+    selected = router.acquire(urls, "same-prefix")
+    try:
+        assert selected == "http://10.0.0.5:8001"
+    finally:
+        router.release(selected)
+
+
+def test_router_keeps_last_enabled_endpoint_out_of_disabled_file(tmp_path) -> None:
+    store = DisabledUpstreamStore(tmp_path / "disabled-upstreams.txt")
+    router = SmartUpstreamRouter(disabled_store=store)
+    urls = ("http://10.0.0.5:8000",)
+
+    for _ in range(4):
+        router.record_result(
+            "http://10.0.0.5:8000",
+            status_code=503,
+            error="boom",
+            base_urls=urls,
+        )
+
+    assert store.load() == set()
 
 
 def test_sandbox_config_requires_solver_model_env() -> None:

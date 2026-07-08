@@ -529,6 +529,7 @@ class LLMProxy:
             base_url,
             status_code=request.status_code,
             error=request.error,
+            base_urls=self.upstream.base_urls,
         )
 
     @staticmethod

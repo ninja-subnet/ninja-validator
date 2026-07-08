@@ -17,6 +17,12 @@ from dataclasses import dataclass
 
 # Reuse the one shared helper from the async client (no /v1 suffix on the base).
 from tau.openrouter.client import normalize_base_url
+from tau.proxy.routing import (
+    DisabledUpstreamStore,
+    SMART_UPSTREAM_ROUTER,
+    disabled_upstream_store_from_env,
+    filter_disabled_upstream_urls,
+)
 
 OPENROUTER = "openrouter"
 NINJA = "ninja"
@@ -61,6 +67,8 @@ class UpstreamTarget:
         """
         env = os.environ if environ is None else environ
         provider = (env.get("LLM_PROVIDER") or OPENROUTER).strip().lower()
+        disabled_store = disabled_upstream_store_from_env(env)
+        SMART_UPSTREAM_ROUTER.configure_disabled_store(disabled_store)
 
         if provider == OPENROUTER:
             base_urls = _base_urls_from_env(
@@ -69,6 +77,7 @@ class UpstreamTarget:
                 "OPENROUTER_UPSTREAM_BASE_URL",
                 "OPENROUTER_BASE_URL",
             ) or (normalize_base_url(None),)
+            base_urls = _filter_disabled_or_raise(base_urls, store=disabled_store)
             key = env.get("OPENROUTER_API_KEY", "")
             if not key:
                 raise OSError("OPENROUTER_API_KEY not set (LLM_PROVIDER=openrouter)")
@@ -80,6 +89,7 @@ class UpstreamTarget:
             base_urls = _base_urls_from_env(
                 env, "NINJA_INFERENCE_BASE_URLS", "NINJA_INFERENCE_BASE_URL"
             )
+            base_urls = _filter_disabled_or_raise(base_urls, store=disabled_store)
             key = env.get("NINJA_INFERENCE_API_KEY", "")
             if not base_urls:
                 raise OSError("NINJA_INFERENCE_BASE_URL not set (LLM_PROVIDER=ninja)")
@@ -89,6 +99,7 @@ class UpstreamTarget:
             base_urls = _base_urls_from_env(
                 env, "LLM_UPSTREAM_BASE_URLS", "LLM_UPSTREAM_BASE_URL"
             )
+            base_urls = _filter_disabled_or_raise(base_urls, store=disabled_store)
             key = env.get("LLM_UPSTREAM_API_KEY", "")
             if not base_urls:
                 raise OSError("LLM_UPSTREAM_BASE_URL not set (LLM_PROVIDER=custom)")
@@ -125,3 +136,18 @@ def _normalize_base_urls(raw_urls: tuple[str, ...]) -> tuple[str, ...]:
         if url not in normalized:
             normalized.append(url)
     return tuple(normalized)
+
+
+def _filter_disabled_or_raise(
+    base_urls: tuple[str, ...],
+    *,
+    store: DisabledUpstreamStore | None,
+) -> tuple[str, ...]:
+    filtered = filter_disabled_upstream_urls(base_urls, store=store)
+    if base_urls and not filtered:
+        raise OSError(
+            "all configured solver upstream endpoints are disabled; "
+            "remove at least one URL from TAU_SOLVER_DISABLED_UPSTREAMS_FILE "
+            "before starting"
+        )
+    return filtered

@@ -39,6 +39,7 @@ qualification-worker = "tau.workers.qualification:main"
 duel-resolver = "tau.workers.duel_resolver:main"
 task-solver = "tau.workers.task_solver:main"
 weight-setter = "tau.workers.weight_setter:main"
+tau-prune-disabled-upstreams = "tau.proxy.env_prune:main"
 
 [build-system]
 requires = ["uv_build>=0.11.3,<0.12.0"]

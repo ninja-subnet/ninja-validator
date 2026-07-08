@@ -491,6 +491,13 @@ docker compose logs migrate     # confirm "alembic upgrade head" succeeded
   `shm_size: 1gb`. The db service is capped at 4 CPU / 8 GB — keep those ≥ what the conf implies.
 - **Monitoring:** connect the read-only role with
   `psql "postgresql://monitor:<MONITOR_PASSWORD>@localhost:5432/arena"`.
+- **Prune disabled solver endpoints from `.env`:** the solver writes flaky
+  endpoints to `TAU_SOLVER_DISABLED_UPSTREAMS_FILE`. To intentionally reflect
+  that state back into your comma-separated upstream list, run:
+  ```bash
+  uv run tau-prune-disabled-upstreams .env
+  docker compose up -d --force-recreate task-solver
+  ```
 
 ### Adding a new migration
 
@@ -551,6 +558,7 @@ authoritative, commented list). Grouped by concern:
 | `LLM_UPSTREAM_BASE_URL` / `LLM_UPSTREAM_API_KEY` | unset | Used when `LLM_PROVIDER=custom` (any OpenAI-compatible endpoint). |
 | `LLM_UPSTREAM_BASE_URLS` | unset | Optional comma-separated custom endpoints, e.g. `<solver-host>:8000/v1,<solver-host>:8001/v1`; sandbox solves use smart sticky routing by default. |
 | `TAU_SOLVER_SMART_CACHE_ROUTING` | `true` | Keep each sandbox solve on one upstream endpoint and reuse prompt-prefix affinity across solves; set false for per-request round-robin. |
+| `TAU_SOLVER_DISABLED_UPSTREAMS_FILE` | unset code fallback; `/var/lib/tau/sandbox-work/disabled-upstreams.txt` in `.env.example` | Optional newline-delimited disabled endpoint file. When set, endpoints that reach the max 240s cooldown are written here and avoided permanently; remove the URL from this file and restart the solver to re-enable it. Run `uv run tau-prune-disabled-upstreams .env` to deliberately prune disabled URLs from comma-separated upstream lists. Automatic disable keeps at least one configured endpoint available. |
 
 ### task-generator tuning
 

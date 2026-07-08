@@ -8,16 +8,83 @@ to it, and remember prompt-prefix affinity for future similar solves.
 
 from __future__ import annotations
 
+import logging
+import os
 import time
+from collections.abc import Mapping
 from dataclasses import dataclass
+from pathlib import Path
 from threading import Lock
 from typing import Any
 
 from .cache import json_sha256
+from tau.openrouter.client import normalize_base_url
 
 _PREFIX_MESSAGE_ROLES = frozenset({"system", "developer", "user"})
 _MAX_PREFIX_CHARS = 16_000
 INFRA_UPSTREAM_STATUSES = frozenset({401, 402, 403, 408, 429})
+_DISABLED_UPSTREAMS_FILE_ENV = "TAU_SOLVER_DISABLED_UPSTREAMS_FILE"
+_PERMANENT_DISABLE_FAILURES = 4
+
+log = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True, slots=True)
+class DisabledUpstreamStore:
+    """Newline-delimited disabled upstream list, normalized without a /v1 suffix."""
+
+    path: Path
+
+    def load(self) -> set[str]:
+        try:
+            raw = self.path.read_text(encoding="utf-8")
+        except FileNotFoundError:
+            return set()
+        except OSError:
+            log.exception("failed to read disabled upstreams file %s", self.path)
+            return set()
+        disabled: set[str] = set()
+        for line in raw.splitlines():
+            value = line.split("#", 1)[0].strip()
+            if value:
+                disabled.add(normalize_base_url(value))
+        return disabled
+
+    def add(self, base_url: str) -> None:
+        disabled = self.load()
+        normalized = normalize_base_url(base_url)
+        if normalized in disabled:
+            return
+        disabled.add(normalized)
+        try:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            self.path.write_text(
+                "\n".join(sorted(disabled)) + "\n",
+                encoding="utf-8",
+            )
+        except OSError:
+            log.exception("failed to write disabled upstreams file %s", self.path)
+
+
+def disabled_upstream_store_from_env(
+    environ: Mapping[str, str] | None = None,
+) -> DisabledUpstreamStore | None:
+    env = os.environ if environ is None else environ
+    raw = (env.get(_DISABLED_UPSTREAMS_FILE_ENV) or "").strip()
+    return DisabledUpstreamStore(Path(raw)) if raw else None
+
+
+def filter_disabled_upstream_urls(
+    base_urls: tuple[str, ...],
+    *,
+    store: DisabledUpstreamStore | None,
+) -> tuple[str, ...]:
+    if store is None:
+        return base_urls
+    disabled = store.load()
+    if not disabled:
+        return base_urls
+    return tuple(url for url in base_urls if normalize_base_url(url) not in disabled)
 
 
 @dataclass(slots=True)
@@ -43,14 +110,19 @@ class SmartUpstreamRouter:
         cooldown_seconds: float = 60,
         max_affinities: int = 4096,
         affinity_load_slack: int = 1,
+        disabled_store: DisabledUpstreamStore | None = None,
+        permanent_disable_failures: int = _PERMANENT_DISABLE_FAILURES,
     ) -> None:
         self.affinity_ttl_seconds = affinity_ttl_seconds
         self.cooldown_seconds = cooldown_seconds
         self.max_affinities = max_affinities
         self.affinity_load_slack = affinity_load_slack
+        self.disabled_store = disabled_store
+        self.permanent_disable_failures = permanent_disable_failures
         self._lock = Lock()
         self._states: dict[str, _EndpointState] = {}
         self._affinities: dict[str, _AffinityEntry] = {}
+        self._permanently_disabled: set[str] = set()
         self._cursor = 0
 
     def reset(self) -> None:
@@ -58,7 +130,14 @@ class SmartUpstreamRouter:
         with self._lock:
             self._states.clear()
             self._affinities.clear()
+            self._permanently_disabled.clear()
+            self.disabled_store = None
             self._cursor = 0
+
+    def configure_disabled_store(self, store: DisabledUpstreamStore | None) -> None:
+        with self._lock:
+            self.disabled_store = store
+            self._permanently_disabled = set()
 
     def acquire(
         self, base_urls: tuple[str, ...], affinity_key: str | None = None
@@ -68,9 +147,10 @@ class SmartUpstreamRouter:
         now = time.monotonic()
         with self._lock:
             self._expire_affinities_locked(now)
+            enabled_urls = self._enabled_base_urls_locked(base_urls)
             candidates = [
-                url for url in base_urls if self._state_for(url).cooldown_until <= now
-            ] or list(base_urls)
+                url for url in enabled_urls if self._state_for(url).cooldown_until <= now
+            ] or enabled_urls
             preferred = self._preferred_locked(
                 affinity_key=affinity_key,
                 base_urls=base_urls,
@@ -102,6 +182,7 @@ class SmartUpstreamRouter:
         *,
         status_code: int | None,
         error: str | None,
+        base_urls: tuple[str, ...] | None = None,
     ) -> None:
         now = time.monotonic()
         with self._lock:
@@ -111,6 +192,8 @@ class SmartUpstreamRouter:
                 state.cooldown_until = now + (
                     self.cooldown_seconds * min(state.failures, 4)
                 )
+                if state.failures >= self.permanent_disable_failures:
+                    self._disable_permanently_locked(base_url, base_urls)
             elif status_code is not None and status_code < 400 and error is None:
                 state.failures = 0
                 state.cooldown_until = 0.0
@@ -169,6 +252,47 @@ class SmartUpstreamRouter:
         ]
         for key in expired:
             self._affinities.pop(key, None)
+
+    def _enabled_base_urls_locked(self, base_urls: tuple[str, ...]) -> list[str]:
+        disabled = self._disabled_locked()
+        enabled = [url for url in base_urls if url not in disabled]
+        return enabled or list(base_urls)
+
+    def _disabled_locked(self) -> set[str]:
+        disabled = set(self._permanently_disabled)
+        if self.disabled_store is not None:
+            disabled.update(self.disabled_store.load())
+        return disabled
+
+    def _disable_permanently_locked(
+        self, base_url: str, base_urls: tuple[str, ...] | None
+    ) -> None:
+        if self.disabled_store is None:
+            return
+        configured_urls = base_urls or tuple(self._states)
+        currently_enabled = [
+            url for url in configured_urls if url not in self._disabled_locked()
+        ]
+        if base_url in currently_enabled and len(currently_enabled) <= 1:
+            log.warning(
+                "not permanently disabling upstream %s; it is the last enabled endpoint",
+                base_url,
+            )
+            return
+        self._permanently_disabled.add(base_url)
+        self._affinities = {
+            key: entry
+            for key, entry in self._affinities.items()
+            if entry.base_url != base_url
+        }
+        self.disabled_store.add(base_url)
+        log.error(
+            "permanently disabled upstream %s after %d infra failures; "
+            "remove it from %s and restart to re-enable",
+            base_url,
+            self.permanent_disable_failures,
+            self.disabled_store.path,
+        )
 
     def _state_for(self, base_url: str) -> _EndpointState:
         state = self._states.get(base_url)
