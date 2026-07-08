@@ -668,6 +668,10 @@ with the compose mounts if changed.
 - **Solve a single task in isolation** (no DB, no worker loop) —
   [scripts/solve_one.py](scripts/solve_one.py): mine or reuse a task, run one
   agent in the sandbox, print the result/diff (`--trace` streams the LLM calls).
+- **Batch king vs challenger eval** (no DB, fixed task pool, mean-score margin) —
+  [scripts/batch_duel.py](scripts/batch_duel.py): concurrent solves + parallel GLM
+  judge (`TAU_JUDGE_CONCURRENCY`, default 5). Re-run to resume from jsonl
+  checkpoints; use `--king-patch-dir` to reuse king diffs across challengers.
 - **Inspect the commit sampler** — [scripts/sample_commit.py](scripts/sample_commit.py)
   (`--json`, `--patch`, `--seed`).
 - **Check GitHub token quota** — [scripts/check_github_quota.py](scripts/check_github_quota.py).
@@ -695,7 +699,7 @@ src/tau/
   pools.py            # pool targets
 deploy/               # db init + tuning, migrations, worker & sandbox Dockerfiles
 examples/task_solver/ # local dry-run harness + sample agents
-scripts/              # one-off tools (solve_one, sample_commit, quota)
+scripts/              # one-off tools (solve_one, batch_duel, sample_commit, quota)
 docs/diagrams/        # diagram sources (.mmd) + rendered .png
 compose.yaml          # the full stack
 ```
