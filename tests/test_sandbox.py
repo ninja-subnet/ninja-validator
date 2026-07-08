@@ -19,7 +19,7 @@ from tau.sandbox.config import SandboxConfig
 from tau.sandbox.harness import HARNESS_SCRIPT, RESULT_SENTINEL
 from tau.sandbox.image import _build_context, _sortdir_source, image_tag
 from tau.sandbox.network import _OWN_CONTAINER_ID
-from tau.sandbox.repo import CloneError, _authed_url, _git
+from tau.sandbox.repo import CloneError, _authed_url, _git, clone_task_repo
 from tau.sandbox.runner import (
     _deterministic_agent_env,
     _parse_result,
@@ -85,6 +85,60 @@ def test_git_timeout_is_clone_error_and_redacts_auth(monkeypatch) -> None:
     assert "timed out after 1 seconds" in message
     assert "supersecret" not in message
     assert "https://<redacted>@github.com/octo/repo.git" in message
+
+
+def test_clone_task_repo_uses_cache_for_same_repo_commit(monkeypatch, tmp_path: Path) -> None:
+    calls: list[tuple[str, tuple[str, ...], Path | None]] = []
+
+    def fake_git(
+        args: list[str], *, cwd: Path | None = None, timeout: int = 300
+    ) -> str:
+        _ = timeout
+        calls.append((args[0], tuple(args), cwd))
+        if args[0] == "clone":
+            dest = Path(args[-1])
+            dest.mkdir(parents=True, exist_ok=True)
+            (dest / ".git").mkdir()
+            (dest / "main.py").write_text("VALUE = 1\n", encoding="utf-8")
+        elif args[0] == "fetch":
+            assert cwd is not None
+            (cwd / ".git" / "FETCHED").write_text(args[-1], encoding="utf-8")
+        elif args[0] == "checkout":
+            assert cwd is not None
+            (cwd / ".git" / "HEAD").write_text("detached\n", encoding="utf-8")
+        return ""
+
+    def fake_run(*args, **kwargs):  # noqa: ANN001
+        _ = kwargs
+        return subprocess.CompletedProcess(args[0], 0, "", "")
+
+    monkeypatch.setattr("tau.sandbox.repo._git", fake_git)
+    monkeypatch.setattr("tau.sandbox.repo.subprocess.run", fake_run)
+
+    commit = "a" * 40
+    cache_dir = tmp_path / "cache"
+    first = clone_task_repo(
+        repo_clone_url="https://github.com/octo/repo.git",
+        base_commit=commit,
+        token="secret",
+        dest=tmp_path / "first",
+        cache_dir=cache_dir,
+    )
+    second = clone_task_repo(
+        repo_clone_url="https://github.com/octo/repo.git",
+        base_commit=commit,
+        token="secret",
+        dest=tmp_path / "second",
+        cache_dir=cache_dir,
+    )
+
+    assert (first / "main.py").read_text(encoding="utf-8") == "VALUE = 1\n"
+    assert (second / "main.py").read_text(encoding="utf-8") == "VALUE = 1\n"
+    assert (first / ".git").is_dir()
+    assert (second / ".git").is_dir()
+    assert [name for name, _args, _cwd in calls].count("clone") == 1
+    assert [name for name, _args, _cwd in calls].count("fetch") == 1
+    assert [name for name, _args, _cwd in calls].count("checkout") == 1
 
 
 def test_prepare_workdir_lays_out_bundle(tmp_path: Path) -> None:
