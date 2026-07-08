@@ -23,6 +23,8 @@ Resume: re-run the same command; cached solves and verdicts in ``out-dir`` are s
 
 Needs (in ``.env``): ``OPENROUTER_API_KEY`` (judge), ``GITHUB_TOKEN`` (task gen / clones),
 Docker, and solver upstream vars (``LLM_PROVIDER``, ``SOLVER_MODEL``, …) for solves.
+Uses the same task-repo checkout cache as the task-solver worker when
+``TAU_TASK_REPO_CACHE_DIR`` / ``TAU_SANDBOX_WORK_ROOT`` are set (see ``.env.example``).
 Set ``TAU_JUDGE_USE_DUMMY_LLM=1`` for token-free judge smoke tests.
 """
 
@@ -62,6 +64,7 @@ from tau.taskgen import generate_task_description
 from tau.workers.judge import judge_with_fallback
 from tau.workers.judge.config import JudgeWorkerConfig
 from tau.workers.judge.main import _build_judge_clients
+from tau.workers.task_solver.config import SolverConfig
 
 ROOT = Path(__file__).resolve().parent.parent
 GENERATOR_MODEL_ENV = "TAU_GENERATOR_MODEL"
@@ -83,9 +86,13 @@ class SolveSession:
     budget: SolveBudget
     image_tag: str
     github_token: str | None
+    task_repo_cache_dir: Path | None
+    task_repo_fetch_concurrency: int
+    task_repo_cache_max_entries: int
 
     @classmethod
     def open(cls) -> SolveSession:
+        solver_cfg = SolverConfig.from_env()
         client = docker.from_env()
         config = SandboxConfig.from_env()
         upstream = UpstreamTarget.from_env()
@@ -97,7 +104,10 @@ class SolveSession:
             upstream=upstream,
             budget=budget,
             image_tag=image_tag,
-            github_token=_github_token(),
+            github_token=solver_cfg.github_token,
+            task_repo_cache_dir=solver_cfg.task_repo_cache_dir,
+            task_repo_fetch_concurrency=solver_cfg.task_repo_fetch_concurrency,
+            task_repo_cache_max_entries=solver_cfg.task_repo_cache_max_entries,
         )
 
     def close(self) -> None:
@@ -110,6 +120,9 @@ class SolveSession:
                 base_commit=task["parent_sha"],
                 token=self.github_token,
                 dest=Path(tmp) / "repo",
+                cache_dir=self.task_repo_cache_dir,
+                fetch_concurrency=self.task_repo_fetch_concurrency,
+                cache_max_entries=self.task_repo_cache_max_entries,
             )
             result = run_agent_in_container(
                 AgentRunRequest(
@@ -129,14 +142,6 @@ class SolveSession:
 
 def patch_path(agent_dir: Path, task: dict, patch_dir: Path) -> Path:
     return patch_dir / f"{agent_dir.name}_{task['task_id']}.diff"
-
-
-def _github_token() -> str | None:
-    tokens = [t.strip() for t in os.environ.get("GITHUB_TOKENS", "").split(",") if t.strip()]
-    if tokens:
-        return tokens[0]
-    single = os.environ.get("GITHUB_TOKEN")
-    return single.strip() if single and single.strip() else None
 
 
 def _append_jsonl(path: Path, row: dict) -> None:

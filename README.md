@@ -669,9 +669,10 @@ with the compose mounts if changed.
   [scripts/solve_one.py](scripts/solve_one.py): mine or reuse a task, run one
   agent in the sandbox, print the result/diff (`--trace` streams the LLM calls).
 - **Batch king vs challenger eval** (no DB, fixed task pool, mean-score margin) —
-  [scripts/batch_duel.py](scripts/batch_duel.py): concurrent solves + parallel GLM
-  judge (`TAU_JUDGE_CONCURRENCY`, default 5). Re-run to resume from jsonl
-  checkpoints; use `--king-patch-dir` to reuse king diffs across challengers.
+  [scripts/batch_duel.py](scripts/batch_duel.py): concurrent solves (shared Docker
+  client, task-repo checkout cache from §env), parallel GLM judge
+  (`TAU_JUDGE_CONCURRENCY`, default 5). Re-run to resume from jsonl checkpoints;
+  use `--king-patch-dir` to reuse king diffs when sweeping challengers on the same pool.
 - **Inspect the commit sampler** — [scripts/sample_commit.py](scripts/sample_commit.py)
   (`--json`, `--patch`, `--seed`).
 - **Check GitHub token quota** — [scripts/check_github_quota.py](scripts/check_github_quota.py).

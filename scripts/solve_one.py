@@ -57,6 +57,7 @@ from tau.sandbox import (
 )
 from tau.sandbox import runner as sandbox_runner
 from tau.taskgen import generate_task_description
+from tau.workers.task_solver.config import SolverConfig
 
 # --- configuration (edit these) ----------------------------------------------------
 ROOT = Path(__file__).resolve().parent.parent
@@ -179,11 +180,15 @@ def _solve(task: dict) -> AgentRunResult:
             log.info(
                 "cloning %s @ %s...", task["repo_clone_url"], task["parent_sha"][:8]
             )
+            solver_cfg = SolverConfig.from_env()
             repo_dir = clone_task_repo(
                 repo_clone_url=task["repo_clone_url"],
                 base_commit=task["parent_sha"],
-                token=_github_token(),
+                token=solver_cfg.github_token,
                 dest=Path(tmp) / "repo",
+                cache_dir=solver_cfg.task_repo_cache_dir,
+                fetch_concurrency=solver_cfg.task_repo_fetch_concurrency,
+                cache_max_entries=solver_cfg.task_repo_cache_max_entries,
             )
             log.info("running agent %r in the sandbox...", AGENT_DIR.name)
             return run_agent_in_container(
