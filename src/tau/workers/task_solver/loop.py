@@ -129,6 +129,15 @@ def _report_failure(
     )
 
 
+def _tick_sleep_seconds(ran: int, config: SolverConfig) -> float:
+    """Idle wait after a tick: short when saturated, full poll when idle or partial."""
+    if ran == 0:
+        return config.poll_seconds
+    if ran >= config.max_containers:
+        return config.backlog_poll_seconds
+    return config.poll_seconds
+
+
 def run(
     *,
     db: SolverDb,
@@ -137,13 +146,14 @@ def run(
     image_tag: str,
     stop: threading.Event,
 ) -> None:
-    """Run ticks until *stop* is set, sleeping ``poll_seconds`` between them."""
+    """Run ticks until *stop* is set, sleeping between them."""
     while not stop.is_set():
+        ran = 0
         try:
-            _tick(db=db, client=client, config=config, image_tag=image_tag, stop=stop)
+            ran = _tick(db=db, client=client, config=config, image_tag=image_tag, stop=stop)
         except Exception:  # noqa: BLE001 — one bad tick must not kill the worker
             log.exception("solver tick failed")
-        stop.wait(config.poll_seconds)
+        stop.wait(_tick_sleep_seconds(ran, config))
 
 
 def _tick(

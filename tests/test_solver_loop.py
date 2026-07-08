@@ -305,3 +305,72 @@ def test_report_failure_unrecognized_is_generic(monkeypatch) -> None:
 def test_report_failure_noop_on_completion(monkeypatch) -> None:
     fake = _report(monkeypatch, _res(EXIT_COMPLETED))
     assert fake.failures == []
+
+
+@pytest.mark.parametrize(
+    ("ran", "expected"),
+    [
+        (0, 30.0),
+        (3, 30.0),
+        (4, 1.0),
+        (50, 1.0),
+    ],
+)
+def test_tick_sleep_seconds(ran: int, expected: float) -> None:
+    cfg = SimpleNamespace(max_containers=4, poll_seconds=30.0, backlog_poll_seconds=1.0)
+    assert loop_mod._tick_sleep_seconds(ran, cfg) == expected
+
+
+def test_run_uses_backlog_poll_when_tick_saturates(monkeypatch) -> None:
+    waits: list[float] = []
+    stop = threading.Event()
+
+    def fake_wait(seconds: float) -> bool:
+        waits.append(seconds)
+        if len(waits) >= 2:
+            stop.set()
+        return stop.is_set()
+
+    monkeypatch.setattr(loop_mod, "_tick", lambda **_kw: 4)
+    stop.wait = fake_wait  # type: ignore[method-assign]
+
+    loop_mod.run(
+        db=object(),
+        client=None,
+        config=SimpleNamespace(
+            max_containers=4,
+            poll_seconds=30.0,
+            backlog_poll_seconds=1.0,
+        ),
+        image_tag="img",
+        stop=stop,
+    )
+
+    assert waits == [1.0, 1.0]
+
+
+def test_run_uses_idle_poll_when_tick_has_no_work(monkeypatch) -> None:
+    waits: list[float] = []
+    stop = threading.Event()
+
+    def fake_wait(seconds: float) -> bool:
+        waits.append(seconds)
+        stop.set()
+        return True
+
+    monkeypatch.setattr(loop_mod, "_tick", lambda **_kw: 0)
+    stop.wait = fake_wait  # type: ignore[method-assign]
+
+    loop_mod.run(
+        db=object(),
+        client=None,
+        config=SimpleNamespace(
+            max_containers=4,
+            poll_seconds=30.0,
+            backlog_poll_seconds=1.0,
+        ),
+        image_tag="img",
+        stop=stop,
+    )
+
+    assert waits == [30.0]

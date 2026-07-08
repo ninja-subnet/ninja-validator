@@ -248,11 +248,12 @@ up to `MAX_CONTAINERS` sandboxes in parallel:
 Active duel solves are prioritized; qualification jobs fill remaining capacity. See
 [§8](#8-agent-execution-environment-sandboxing) for how the sandbox works.
 `MAX_CONTAINERS` is both the per-tick batch size and the maximum number of
-concurrent sandboxes. After each tick the worker waits `TAU_SOLVER_POLL_SECONDS`
-before polling for the next batch, so a backlog larger than `MAX_CONTAINERS`
-pays that wait between batches. The deployment example uses
-`MAX_CONTAINERS=50`, so 100 ready solves take 2 ticks, with one poll wait
-between those batches.
+concurrent sandboxes. After each tick the worker waits before polling again:
+when the tick launched `MAX_CONTAINERS` jobs (backlog likely remains) it sleeps
+`TAU_SOLVER_BACKLOG_POLL_SECONDS` (default 1s); otherwise it waits
+`TAU_SOLVER_POLL_SECONDS` (default 30s). The deployment example uses
+`MAX_CONTAINERS=50`, so 100 ready solves take 2 ticks with ~1s between them
+instead of 30s.
 
 | Loop | Database |
 |------|----------|
@@ -604,7 +605,8 @@ authoritative, commented list). Grouped by concern:
 |-----|---------|--------|
 | `SOLVER_MODEL` | required | Model the proxy forces every agent request onto. Set it in `.env`. |
 | `MAX_CONTAINERS` | `4` code fallback; `50` in `.env.example` | Max concurrent sandboxes per tick, and therefore the per-tick batch size. Size this to host and upstream capacity. |
-| `TAU_SOLVER_POLL_SECONDS` | `30` | Sleep between solver ticks; if backlog remains, this wait repeats between batches. |
+| `TAU_SOLVER_POLL_SECONDS` | `30` | Sleep after an idle or partial tick (no work, or fewer than `MAX_CONTAINERS` jobs). |
+| `TAU_SOLVER_BACKLOG_POLL_SECONDS` | `1` | Sleep after a saturated tick (`MAX_CONTAINERS` jobs) while backlog likely remains. |
 | `TAU_SOLVER_QUALIFY_MIN_CHANGED_LINES` | `1` | Min diff lines the king must change to QUALIFY a task. |
 | `TAU_SOLVER_REQUIRE_FULL_POOL_FOR_DUELS` | `false` code fallback; `true` in `.env.example` | Wait until the active pool has target QUALIFIED tasks before scheduling duel solves. |
 | `TAU_SUBMISSIONS_DIR` | `submissions` | Host dir of extracted submissions (mounted read-only, same path). |
