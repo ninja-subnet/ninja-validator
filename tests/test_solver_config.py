@@ -1,5 +1,7 @@
 from pathlib import Path
 
+import pytest
+
 from tau.workers.task_solver.config import SolverConfig, _task_repo_cache_dir
 
 
@@ -34,3 +36,21 @@ def test_solver_config_reads_backlog_poll_seconds() -> None:
         }
     )
     assert cfg.backlog_poll_seconds == 2.5
+
+
+def test_solver_config_rejects_non_positive_poll_seconds() -> None:
+    with pytest.raises(ValueError, match="poll_seconds must be positive"):
+        SolverConfig(
+            upstream=None,  # type: ignore[arg-type]
+            sandbox=None,  # type: ignore[arg-type]
+            poll_seconds=0,
+        )
+
+
+def test_solver_config_rejects_non_positive_backlog_poll_seconds() -> None:
+    with pytest.raises(ValueError, match="backlog_poll_seconds must be positive"):
+        SolverConfig(
+            upstream=None,  # type: ignore[arg-type]
+            sandbox=None,  # type: ignore[arg-type]
+            backlog_poll_seconds=0,
+        )

@@ -69,6 +69,14 @@ class SolverConfig:
     require_full_pool_for_duels: bool = False
     pool_targets: PoolTargets = field(default_factory=PoolTargets)
 
+    def __post_init__(self) -> None:
+        if self.max_containers < 1:
+            raise ValueError("max_containers must be >= 1")
+        if self.poll_seconds <= 0:
+            raise ValueError("poll_seconds must be positive")
+        if self.backlog_poll_seconds <= 0:
+            raise ValueError("backlog_poll_seconds must be positive")
+
     @classmethod
     def from_env(cls, environ: Mapping[str, str] | None = None) -> SolverConfig:
         env = os.environ if environ is None else environ
