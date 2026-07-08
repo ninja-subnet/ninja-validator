@@ -1,11 +1,15 @@
 # Sandbox image: the locked-down environment one miner agent runs in.
-# Kept minimal — Python + git + a couple of common agent runtimes. The agent's own
-# single-file code is copied in at run time (not baked here), and it reaches the LLM
-# only through the validator proxy (no internet on the sandbox's network).
+# Human-readable mirror of src/tau/sandbox/image.py, which builds the runtime image.
+# The agent's own bundle is mounted at run time, and it reaches the LLM only through
+# the validator proxy (no internet on the sandbox's network).
 FROM python:3.11-slim
 
+COPY src/tau/sandbox/sortdir.c /opt/tau/sortdir.c
+
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends bash git ca-certificates \
+    && apt-get install -y --no-install-recommends bash git ca-certificates gcc libc6-dev \
+    && gcc -O2 -shared -fPIC -o /opt/tau/libsortdir.so /opt/tau/sortdir.c -ldl -lpthread \
+    && apt-get purge -y --auto-remove gcc libc6-dev \
     && rm -rf /var/lib/apt/lists/*
 
 # Pre-install a common agent runtime so typical agents import without network

@@ -1,12 +1,13 @@
 """Build (and cache) the sandbox image via the docker-py SDK.
 
-The Dockerfile is embedded here as a string (not read from disk): the worker image
-ships only ``src/`` + ``pyproject``, so the on-disk ``deploy/sandbox/Dockerfile`` is
-NOT present at runtime, and the builder sends the Dockerfile as an in-memory build
-context anyway. ``deploy/sandbox/Dockerfile`` is kept as a human-readable mirror.
+The Dockerfile is embedded here as a string, then sent with the sortdir shim as a
+tiny in-memory build context. The worker image ships only the installed ``tau``
+package, so the on-disk ``deploy/sandbox/Dockerfile`` is documentation rather than
+runtime input.
 
-The image is tagged by a content hash of that text, so a change forces a rebuild
-while steady state is a cache hit. Built once at worker startup.
+The image is tagged by a content hash of the Dockerfile plus shim source, so a
+change forces a rebuild while steady state is a cache hit. Built once at worker
+startup.
 """
 
 from __future__ import annotations
@@ -14,6 +15,8 @@ from __future__ import annotations
 import hashlib
 import io
 import logging
+import tarfile
+from pathlib import Path
 
 import docker
 from docker.errors import ImageNotFound
@@ -22,6 +25,8 @@ from .config import SandboxConfig
 
 log = logging.getLogger(__name__)
 
+_SORTDIR_SOURCE_PATH = Path(__file__).resolve().with_name("sortdir.c")
+
 # The sandbox one miner agent runs in: Python + git + common agent runtimes. Kept in
 # sync with deploy/sandbox/Dockerfile (that file is documentation; this is the source
 # of truth at runtime). The agent's own bundle is bind-mounted in at run time, and it
@@ -29,8 +34,12 @@ log = logging.getLogger(__name__)
 SANDBOX_DOCKERFILE = """\
 FROM python:3.11-slim
 
+COPY sortdir.c /opt/tau/sortdir.c
+
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends bash git ca-certificates \
+    && apt-get install -y --no-install-recommends bash git ca-certificates gcc libc6-dev \
+    && gcc -O2 -shared -fPIC -o /opt/tau/libsortdir.so /opt/tau/sortdir.c -ldl -lpthread \
+    && apt-get purge -y --auto-remove gcc libc6-dev \
     && rm -rf /var/lib/apt/lists/*
 
 RUN python -m pip install --no-cache-dir --upgrade pip \
@@ -46,10 +55,35 @@ def _dockerfile_text() -> str:
     return SANDBOX_DOCKERFILE
 
 
+def _sortdir_source() -> str:
+    return _SORTDIR_SOURCE_PATH.read_text(encoding="utf-8")
+
+
 def image_tag(config: SandboxConfig) -> str:
-    """Deterministic ``name:hash`` tag derived from the Dockerfile contents."""
-    digest = hashlib.sha256(_dockerfile_text().encode("utf-8")).hexdigest()[:16]
-    return f"{config.image_name}:{digest}"
+    """Deterministic ``name:hash`` tag derived from sandbox build inputs."""
+    digest = hashlib.sha256()
+    digest.update(_dockerfile_text().encode("utf-8"))
+    digest.update(b"\0")
+    digest.update(_sortdir_source().encode("utf-8"))
+    return f"{config.image_name}:{digest.hexdigest()[:16]}"
+
+
+def _build_context() -> io.BytesIO:
+    context = io.BytesIO()
+    with tarfile.open(fileobj=context, mode="w") as tar:
+        _add_context_file(tar, "Dockerfile", _dockerfile_text())
+        _add_context_file(tar, "sortdir.c", _sortdir_source())
+    context.seek(0)
+    return context
+
+
+def _add_context_file(tar: tarfile.TarFile, name: str, text: str) -> None:
+    payload = text.encode("utf-8")
+    info = tarfile.TarInfo(name)
+    info.size = len(payload)
+    info.mtime = 0
+    info.mode = 0o644
+    tar.addfile(info, io.BytesIO(payload))
 
 
 def ensure_sandbox_image(client: docker.DockerClient, config: SandboxConfig) -> str:
@@ -68,10 +102,11 @@ def ensure_sandbox_image(client: docker.DockerClient, config: SandboxConfig) -> 
             pass
 
     log.info("building sandbox image %s", tag)
-    dockerfile = _dockerfile_text().encode("utf-8")
-    # A tiny in-memory build context containing just the Dockerfile.
+    # A tiny in-memory build context containing the Dockerfile and sortdir.c.
     _, logs = client.images.build(
-        fileobj=io.BytesIO(dockerfile),
+        fileobj=_build_context(),
+        custom_context=True,
+        dockerfile="Dockerfile",
         tag=tag,
         rm=True,
         nocache=config.no_cache,

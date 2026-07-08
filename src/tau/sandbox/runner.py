@@ -72,6 +72,7 @@ log = logging.getLogger(__name__)
 _TASK_SEED_BITS = 53
 _TASK_SEED_MASK = (1 << _TASK_SEED_BITS) - 1
 _VALIDATOR_TASK_SAMPLING_PARAMS: dict[str, float] = {"temperature": 0.0, "top_p": 1.0}
+_SORTDIR_PRELOAD = "/opt/tau/libsortdir.so"
 
 
 def run_agent_in_container(
@@ -200,6 +201,21 @@ def _task_sampling_params(task_id: str) -> dict[str, float | int]:
     return {**_VALIDATOR_TASK_SAMPLING_PARAMS, "seed": _task_seed(task_id)}
 
 
+def _deterministic_agent_env() -> dict[str, str]:
+    env = {
+        "HOME": "/tmp",
+        "TMPDIR": "/tmp",
+        "LANG": "C.UTF-8",
+        "LC_ALL": "C.UTF-8",
+        "PYTHONUNBUFFERED": "1",
+        "PYTHONHASHSEED": "0",
+        "TZ": "UTC",
+    }
+    if not os.environ.get("TAU_DISABLE_SORTDIR"):
+        env["LD_PRELOAD"] = _SORTDIR_PRELOAD
+    return env
+
+
 def _hardening_kwargs(config: SandboxConfig) -> dict:
     kwargs: dict = {
         "mem_limit": config.memory,
@@ -214,7 +230,7 @@ def _hardening_kwargs(config: SandboxConfig) -> dict:
         "ulimits": [
             Ulimit(name="nofile", soft=config.nofile_limit, hard=config.nofile_limit)
         ],
-        "environment": {"HOME": "/tmp"},
+        "environment": _deterministic_agent_env(),
     }
     if config.drop_caps:
         kwargs["cap_drop"] = ["ALL"]
@@ -263,6 +279,7 @@ def _exec_harness(
     raising); the caller decides qualification from the diff.
     """
     env = {
+        **_deterministic_agent_env(),
         "TAU_REPO_DIR": CONTAINER_REPO,
         "TAU_PROMPT_FILE": CONTAINER_PROMPT,
         "TAU_AGENT_FILE": CONTAINER_AGENT,
@@ -272,7 +289,6 @@ def _exec_harness(
         "AGENT_API_BASE": proxy_base_url,
         "AGENT_API_KEY": proxy.auth_token,
         "TAU_AGENT_TIMEOUT_SECONDS": str(req.timeout_seconds or config.hard_timeout_seconds),
-        "HOME": "/tmp",
     }
     hard_timeout = req.timeout_seconds or config.hard_timeout_seconds
     watchdog = _Watchdog(

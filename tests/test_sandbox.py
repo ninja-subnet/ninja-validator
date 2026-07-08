@@ -9,14 +9,18 @@ from __future__ import annotations
 
 import shutil
 import subprocess
+import tarfile
 from pathlib import Path
 
 import pytest
 
+from tau.sandbox.config import SandboxConfig
 from tau.sandbox.harness import HARNESS_SCRIPT, RESULT_SENTINEL
+from tau.sandbox.image import _build_context, _sortdir_source, image_tag
 from tau.sandbox.network import _OWN_CONTAINER_ID
 from tau.sandbox.repo import CloneError, _authed_url, _git
 from tau.sandbox.runner import (
+    _deterministic_agent_env,
     _parse_result,
     _prepare_workdir,
     _task_sampling_params,
@@ -150,6 +154,56 @@ def test_task_sampling_params_lock_validator_defaults() -> None:
         "top_p": 1.0,
         "seed": _task_seed("task-alpha"),
     }
+
+
+def test_deterministic_agent_env_includes_sortdir_preload(monkeypatch) -> None:
+    monkeypatch.delenv("TAU_DISABLE_SORTDIR", raising=False)
+
+    env = _deterministic_agent_env()
+
+    assert env["LD_PRELOAD"] == "/opt/tau/libsortdir.so"
+    assert env["PYTHONHASHSEED"] == "0"
+    assert env["PYTHONUNBUFFERED"] == "1"
+    assert env["TZ"] == "UTC"
+    assert env["HOME"] == "/tmp"
+    assert env["TMPDIR"] == "/tmp"
+    assert env["LANG"] == "C.UTF-8"
+    assert env["LC_ALL"] == "C.UTF-8"
+
+
+def test_deterministic_agent_env_can_disable_sortdir(monkeypatch) -> None:
+    monkeypatch.setenv("TAU_DISABLE_SORTDIR", "1")
+
+    assert "LD_PRELOAD" not in _deterministic_agent_env()
+
+
+def test_sandbox_image_build_context_contains_sortdir() -> None:
+    context = _build_context()
+
+    with tarfile.open(fileobj=context, mode="r") as tar:
+        names = sorted(tar.getnames())
+        dockerfile = tar.extractfile("Dockerfile").read().decode("utf-8")
+        sortdir = tar.extractfile("sortdir.c").read().decode("utf-8")
+
+    assert names == ["Dockerfile", "sortdir.c"]
+    assert "COPY sortdir.c /opt/tau/sortdir.c" in dockerfile
+    assert "libsortdir.so" in dockerfile
+    assert sortdir == _sortdir_source()
+    assert "readdir64" in sortdir
+
+
+def test_sandbox_image_tag_tracks_sortdir_source(monkeypatch) -> None:
+    import tau.sandbox.image as image
+
+    config = SandboxConfig(image_name="tau-test")
+    monkeypatch.setattr(image, "_sortdir_source", lambda: "source one")
+    first = image_tag(config)
+    monkeypatch.setattr(image, "_sortdir_source", lambda: "source two")
+    second = image_tag(config)
+
+    assert first.startswith("tau-test:")
+    assert len(first.removeprefix("tau-test:")) == 16
+    assert first != second
 
 
 def test_harness_script_is_valid_python() -> None:
