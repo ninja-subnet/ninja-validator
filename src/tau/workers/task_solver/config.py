@@ -53,6 +53,9 @@ class SolverConfig:
     # Fresh cache misses still hit GitHub; cap those remote fetches while allowing
     # already-cached local copies to fan out freely.
     task_repo_fetch_concurrency: int = 8
+    # LRU cap on cached checkouts (0 = unbounded). Sized to hold an active king's
+    # full task pool plus the previous pool while it drains.
+    task_repo_cache_max_entries: int = 256
     # Max sandboxes launched per loop tick (across both phases). Sequential.
     max_containers: int = 4
     poll_seconds: float = 30.0
@@ -78,6 +81,11 @@ class SolverConfig:
                 env,
                 "TAU_TASK_REPO_FETCH_CONCURRENCY",
                 d.task_repo_fetch_concurrency,
+            ),
+            task_repo_cache_max_entries=env_int(
+                env,
+                "TAU_TASK_REPO_CACHE_MAX_ENTRIES",
+                d.task_repo_cache_max_entries,
             ),
             max_containers=env_int(env, "MAX_CONTAINERS", d.max_containers),
             poll_seconds=env_float(env, "TAU_SOLVER_POLL_SECONDS", d.poll_seconds),

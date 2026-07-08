@@ -11,6 +11,8 @@ import os
 import shutil
 import subprocess
 import tarfile
+import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pytest
@@ -19,7 +21,7 @@ from tau.sandbox.config import SandboxConfig
 from tau.sandbox.harness import HARNESS_SCRIPT, RESULT_SENTINEL
 from tau.sandbox.image import _build_context, _sortdir_source, image_tag
 from tau.sandbox.network import _OWN_CONTAINER_ID
-from tau.sandbox.repo import CloneError, _authed_url, _git, clone_task_repo
+from tau.sandbox.repo import CloneError, _authed_url, _cache_key, _git, clone_task_repo
 from tau.sandbox.runner import (
     _deterministic_agent_env,
     _parse_result,
@@ -87,7 +89,14 @@ def test_git_timeout_is_clone_error_and_redacts_auth(monkeypatch) -> None:
     assert "https://<redacted>@github.com/octo/repo.git" in message
 
 
-def test_clone_task_repo_uses_cache_for_same_repo_commit(monkeypatch, tmp_path: Path) -> None:
+def _install_fake_git(
+    monkeypatch, *, clone_delay: float = 0.0
+) -> list[tuple[str, tuple[str, ...], Path | None]]:
+    """Stub the repo module's git layer; returns the recorded call list.
+
+    ``subprocess.run`` must be stubbed too: ``_sanitize_git_metadata`` calls it
+    directly (not via ``_git``) and would otherwise touch the fake checkout.
+    """
     calls: list[tuple[str, tuple[str, ...], Path | None]] = []
 
     def fake_git(
@@ -96,6 +105,8 @@ def test_clone_task_repo_uses_cache_for_same_repo_commit(monkeypatch, tmp_path: 
         _ = timeout
         calls.append((args[0], tuple(args), cwd))
         if args[0] == "clone":
+            if clone_delay:
+                time.sleep(clone_delay)
             dest = Path(args[-1])
             dest.mkdir(parents=True, exist_ok=True)
             (dest / ".git").mkdir()
@@ -114,23 +125,26 @@ def test_clone_task_repo_uses_cache_for_same_repo_commit(monkeypatch, tmp_path: 
 
     monkeypatch.setattr("tau.sandbox.repo._git", fake_git)
     monkeypatch.setattr("tau.sandbox.repo.subprocess.run", fake_run)
+    return calls
+
+
+def _cached_clone(tmp_path: Path, *, commit: str, dest: str, **kwargs) -> Path:
+    return clone_task_repo(
+        repo_clone_url="https://github.com/octo/repo.git",
+        base_commit=commit,
+        token="secret",
+        dest=tmp_path / dest,
+        cache_dir=tmp_path / "cache",
+        **kwargs,
+    )
+
+
+def test_clone_task_repo_uses_cache_for_same_repo_commit(monkeypatch, tmp_path: Path) -> None:
+    calls = _install_fake_git(monkeypatch)
 
     commit = "a" * 40
-    cache_dir = tmp_path / "cache"
-    first = clone_task_repo(
-        repo_clone_url="https://github.com/octo/repo.git",
-        base_commit=commit,
-        token="secret",
-        dest=tmp_path / "first",
-        cache_dir=cache_dir,
-    )
-    second = clone_task_repo(
-        repo_clone_url="https://github.com/octo/repo.git",
-        base_commit=commit,
-        token="secret",
-        dest=tmp_path / "second",
-        cache_dir=cache_dir,
-    )
+    first = _cached_clone(tmp_path, commit=commit, dest="first")
+    second = _cached_clone(tmp_path, commit=commit, dest="second")
 
     assert (first / "main.py").read_text(encoding="utf-8") == "VALUE = 1\n"
     assert (second / "main.py").read_text(encoding="utf-8") == "VALUE = 1\n"
@@ -139,6 +153,60 @@ def test_clone_task_repo_uses_cache_for_same_repo_commit(monkeypatch, tmp_path: 
     assert [name for name, _args, _cwd in calls].count("clone") == 1
     assert [name for name, _args, _cwd in calls].count("fetch") == 1
     assert [name for name, _args, _cwd in calls].count("checkout") == 1
+
+
+def test_clone_task_repo_cache_populates_once_under_concurrency(
+    monkeypatch, tmp_path: Path
+) -> None:
+    calls = _install_fake_git(monkeypatch, clone_delay=0.05)
+    commit = "a" * 40
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        dests = list(
+            pool.map(
+                lambda i: _cached_clone(tmp_path, commit=commit, dest=f"dest{i}"),
+                range(8),
+            )
+        )
+
+    for dest in dests:
+        assert (dest / "main.py").read_text(encoding="utf-8") == "VALUE = 1\n"
+    assert [name for name, _args, _cwd in calls].count("clone") == 1
+
+
+def test_clone_task_repo_evicts_oldest_entries_beyond_cap(
+    monkeypatch, tmp_path: Path
+) -> None:
+    _install_fake_git(monkeypatch)
+    cache_dir = tmp_path / "cache"
+    commits = ["a" * 40, "b" * 40, "c" * 40]
+
+    for i, commit in enumerate(commits):
+        _cached_clone(tmp_path, commit=commit, dest=f"dest{i}", cache_max_entries=2)
+        # Force distinct LRU timestamps regardless of filesystem mtime resolution.
+        key = _cache_key("https://github.com/octo/repo.git", commit)
+        os.utime(cache_dir / f"{key}.ready", (i, i))
+
+    keys = [_cache_key("https://github.com/octo/repo.git", c) for c in commits]
+    assert not (cache_dir / keys[0]).exists()  # oldest evicted
+    assert not (cache_dir / f"{keys[0]}.ready").exists()
+    assert (cache_dir / keys[1]).is_dir()
+    assert (cache_dir / keys[2]).is_dir()
+
+
+def test_clone_task_repo_repopulates_on_corrupt_ready_marker(
+    monkeypatch, tmp_path: Path
+) -> None:
+    calls = _install_fake_git(monkeypatch)
+    commit = "a" * 40
+
+    _cached_clone(tmp_path, commit=commit, dest="first")
+    key = _cache_key("https://github.com/octo/repo.git", commit)
+    (tmp_path / "cache" / f"{key}.ready").write_text("deadbeef\n", encoding="utf-8")
+    second = _cached_clone(tmp_path, commit=commit, dest="second")
+
+    assert (second / "main.py").read_text(encoding="utf-8") == "VALUE = 1\n"
+    assert [name for name, _args, _cwd in calls].count("clone") == 2
 
 
 def test_prepare_workdir_lays_out_bundle(tmp_path: Path) -> None:
