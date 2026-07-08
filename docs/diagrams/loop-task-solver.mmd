@@ -16,7 +16,7 @@ flowchart TB
 
     kind -- challenger --> csave["INSERT task_solutions<br/>(solution, duration, exit_reason)<br/>— feeds the judge"]
 
-    leave --> sleep["sleep TAU_SOLVER_POLL_SECONDS (30s)"]
+    leave --> sleep["sleep: ~1s if tick ran MAX_CONTAINERS jobs,<br/>else TAU_SOLVER_POLL_SECONDS (30s)"]
     qual --> sleep
     disq --> sleep
     csave --> sleep

@@ -142,7 +142,7 @@ they read and write.
 |--------|------|-------|--------|----------------|
 | **chain-watcher** | Sync subnet membership from the Bittensor chain | chain metagraph, `registrations` | `registrations` | 6s |
 | **task-generator** | Mine GitHub commits → LLM task descriptions | `kings`, `tasks` (counts) | `tasks` (CANDIDATE), `task_generation_failures` | 30s |
-| **task-solver** | Run king/challenger agents in sandboxes | `kings`, `tasks`, `challenges`, `duel_task_solutions` | `tasks` (QUALIFIED/DISQUALIFIED), `duel_task_solutions` | 30s |
+| **task-solver** | Run king/challenger agents in sandboxes | `kings`, `tasks`, `challenges`, `duel_task_solutions` | `tasks` (QUALIFIED/DISQUALIFIED), `duel_task_solutions` | 30s idle, ~1s on backlog |
 | **judge** | Blinded pairwise LLM comparison | `tasks`, `kings`, `challenges`, `duel_task_solutions`, `judgements` | `judgements` | 10s |
 | **duel-resolver** | Resolve duels, crown kings (**singleton**) | `kings`, `submissions`, `registrations`, `tasks`, `judgements`, `challenges` | `challenges`, `duel_resolutions`, `kings` | 5s |
 
@@ -248,11 +248,11 @@ up to `MAX_CONTAINERS` sandboxes in parallel:
 Active duel solves are prioritized; qualification jobs fill remaining capacity. See
 [§8](#8-agent-execution-environment-sandboxing) for how the sandbox works.
 `MAX_CONTAINERS` is both the per-tick batch size and the maximum number of
-concurrent sandboxes. After each tick the worker waits `TAU_SOLVER_POLL_SECONDS`
-before polling for the next batch, so a backlog larger than `MAX_CONTAINERS`
-pays that wait between batches. The deployment example uses
-`MAX_CONTAINERS=50`, so 100 ready solves take 2 ticks, with one poll wait
-between those batches.
+concurrent sandboxes. After an idle or partial tick the worker waits
+`TAU_SOLVER_POLL_SECONDS` before polling again; after a saturated tick
+(`MAX_CONTAINERS` jobs launched, so backlog likely remains) it re-polls after
+~1s. The deployment example uses `MAX_CONTAINERS=50`, so 100 ready solves take
+2 ticks back to back.
 
 | Loop | Database |
 |------|----------|
@@ -604,7 +604,7 @@ authoritative, commented list). Grouped by concern:
 |-----|---------|--------|
 | `SOLVER_MODEL` | required | Model the proxy forces every agent request onto. Set it in `.env`. |
 | `MAX_CONTAINERS` | `4` code fallback; `50` in `.env.example` | Max concurrent sandboxes per tick, and therefore the per-tick batch size. Size this to host and upstream capacity. |
-| `TAU_SOLVER_POLL_SECONDS` | `30` | Sleep between solver ticks; if backlog remains, this wait repeats between batches. |
+| `TAU_SOLVER_POLL_SECONDS` | `30` | Sleep after an idle or partial tick; a saturated tick re-polls after ~1s to drain backlog. |
 | `TAU_SOLVER_QUALIFY_MIN_CHANGED_LINES` | `1` | Min diff lines the king must change to QUALIFY a task. |
 | `TAU_SOLVER_REQUIRE_FULL_POOL_FOR_DUELS` | `false` code fallback; `true` in `.env.example` | Wait until the active pool has target QUALIFIED tasks before scheduling duel solves. |
 | `TAU_SUBMISSIONS_DIR` | `submissions` | Host dir of extracted submissions (mounted read-only, same path). |
