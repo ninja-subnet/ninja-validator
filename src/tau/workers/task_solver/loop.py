@@ -25,8 +25,9 @@ from __future__ import annotations
 
 import logging
 import threading
+import time
 from collections.abc import Callable
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import Future, ThreadPoolExecutor
 from functools import partial
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -64,6 +65,9 @@ BACKLOG_POLL_SECONDS = 1.0
 # way persists nothing and is retried on a later tick. Everything else — including a bad
 # agent that crashes or returns an empty result — is a terminal outcome and is saved.
 _RETRYABLE_EXIT_REASONS = frozenset({EXIT_UPSTREAM_ERROR, EXIT_SANDBOX_ERROR})
+
+JobKey = tuple[str, str, str, str]
+PendingWork = tuple[JobKey, str, Callable[[], None]]
 
 
 def _agent_dir(config: SolverConfig, submission_id: str) -> Path | None:
@@ -140,80 +144,137 @@ def run(
     image_tag: str,
     stop: threading.Event,
 ) -> None:
-    """Run ticks until *stop* is set: ``poll_seconds`` between idle/partial ticks,
-    ``BACKLOG_POLL_SECONDS`` after a saturated one."""
-    while not stop.is_set():
-        ran = 0
-        try:
-            ran = _tick(
-                db=db, client=client, config=config, image_tag=image_tag, stop=stop
+    """Keep every available sandbox slot filled until *stop* is set.
+
+    Completed keys stay excluded for one normal poll interval. Successful jobs have
+    already left the DB queue; retryable infrastructure failures have not, and the
+    exclusion preserves their previous retry cadence without blocking unrelated work.
+    """
+    cap = config.max_containers
+    inflight: dict[Future[None], JobKey] = {}
+    cooldown: dict[JobKey, float] = {}
+    with ThreadPoolExecutor(max_workers=cap, thread_name_prefix="tau-solve") as pool:
+        while not stop.is_set():
+            now = time.monotonic()
+            for future in [future for future in inflight if future.done()]:
+                key = inflight.pop(future)
+                cooldown[key] = now + config.poll_seconds
+                try:
+                    future.result()
+                except Exception as exc:  # noqa: BLE001
+                    log.exception("solve job failed")
+                    get_axiom().exception(
+                        "task-solver", "solve_job_failed", details=str(exc)
+                    )
+            cooldown = {key: until for key, until in cooldown.items() if until > now}
+
+            slots = cap - len(inflight)
+            launched = 0
+            if slots:
+                try:
+                    work = _pending_work(
+                        db=db,
+                        client=client,
+                        config=config,
+                        image_tag=image_tag,
+                        limit=slots,
+                        exclude=set(inflight.values()) | set(cooldown),
+                    )
+                    if work:
+                        duel_count = sum(phase == "duel" for _, phase, _ in work)
+                        log.info(
+                            "scheduler: launched %d job(s) (%d duel + %d qualification, "
+                            "%d already running, cap=%d)",
+                            len(work),
+                            duel_count,
+                            len(work) - duel_count,
+                            len(inflight),
+                            cap,
+                        )
+                    for key, _, fn in work:
+                        inflight[pool.submit(fn)] = key
+                    launched = len(work)
+                except Exception:  # noqa: BLE001 — one bad poll must not kill the worker
+                    log.exception("solver scheduler poll failed")
+
+            stop.wait(
+                BACKLOG_POLL_SECONDS
+                if inflight or launched
+                else config.poll_seconds
             )
-        except Exception:  # noqa: BLE001 — one bad tick must not kill the worker
-            log.exception("solver tick failed")
-        # A saturated tick means backlog likely remains: re-poll almost
-        # immediately instead of paying the idle interval between batches.
-        saturated = ran >= config.max_containers
-        stop.wait(BACKLOG_POLL_SECONDS if saturated else config.poll_seconds)
 
 
-def _tick(
+def _job_key(job: SolveJob | DuelSolveJob) -> JobKey:
+    if isinstance(job, DuelSolveJob):
+        return (
+            "duel",
+            job.task_id,
+            job.submission_id,
+            job.challenger_submission_id,
+        )
+    return ("qualification", job.task_id, job.submission_id, "")
+
+
+def _pending_work(
     *,
     db: SolverDb,
     client: docker.DockerClient,
     config: SolverConfig,
     image_tag: str,
-    stop: threading.Event,
-) -> int:
-    cap = config.max_containers
-    # Gather this tick's work (active duel first), capped at `cap` total.
-    duel_jobs = db.next_duel_jobs(
-        cap,
-        require_full_pool=config.require_full_pool_for_duels,
-        pool_targets=config.pool_targets,
-    )
+    limit: int,
+    exclude: set[JobKey],
+) -> list[PendingWork]:
+    """Return up to *limit* fresh jobs, preserving duel-first priority."""
+    duel_query_limit = limit + sum(key[0] == "duel" for key in exclude)
+    duel_jobs = [
+        job
+        for job in db.next_duel_jobs(
+            duel_query_limit,
+            require_full_pool=config.require_full_pool_for_duels,
+            pool_targets=config.pool_targets,
+        )
+        if _job_key(job) not in exclude
+    ][:limit]
+    remaining = limit - len(duel_jobs)
+    qual_query_limit = remaining + sum(key[0] == "qualification" for key in exclude)
     qual_jobs = (
-        db.next_qualification_jobs(cap - len(duel_jobs)) if len(duel_jobs) < cap else []
+        [
+            job
+            for job in db.next_qualification_jobs(qual_query_limit)
+            if _job_key(job) not in exclude
+        ][:remaining]
+        if remaining
+        else []
     )
-    work: list[Callable[[], None]] = [
-        partial(
-            _solve_duel,
-            job,
-            db=db,
-            client=client,
-            config=config,
-            image_tag=image_tag,
+    return [
+        (
+            _job_key(job),
+            "duel",
+            partial(
+                _solve_duel,
+                job,
+                db=db,
+                client=client,
+                config=config,
+                image_tag=image_tag,
+            ),
         )
         for job in duel_jobs
     ] + [
-        partial(_qualify, job, db=db, client=client, config=config, image_tag=image_tag)
+        (
+            _job_key(job),
+            "qualification",
+            partial(
+                _qualify,
+                job,
+                db=db,
+                client=client,
+                config=config,
+                image_tag=image_tag,
+            ),
+        )
         for job in qual_jobs
     ]
-    if not work:
-        log.debug("tick: no pending work")
-        return 0
-    if stop.is_set():
-        return 0
-    log.info(
-        "tick: running %d job(s) concurrently (%d duel + %d qualification, cap=%d)",
-        len(work),
-        len(duel_jobs),
-        len(qual_jobs),
-        cap,
-    )
-
-    # Run up to `cap` sandboxes at once. Each job is a self-contained solve+persist
-    # unit (it never raises — failures are logged); a thread pool bounds concurrency.
-    with ThreadPoolExecutor(max_workers=cap, thread_name_prefix="tau-solve") as pool:
-        futures = [pool.submit(fn) for fn in work]
-        for fut in as_completed(futures):
-            try:
-                fut.result()
-            except Exception as exc:  # noqa: BLE001 — a failed solve must not sink the tick
-                log.exception("solve job failed")
-                get_axiom().exception(
-                    "task-solver", "solve_job_failed", details=str(exc)
-                )
-    return len(work)
 
 
 def _qualify(

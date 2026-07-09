@@ -100,7 +100,7 @@ _TERMINAL = [
 ]
 
 
-def test_tick_prioritizes_duel_jobs_before_qualification(monkeypatch) -> None:
+def test_pending_work_prioritizes_duels_before_qualification(monkeypatch) -> None:
     calls: list[tuple[str, str]] = []
     duel_jobs = [
         _duel_job(),
@@ -155,21 +155,23 @@ def test_tick_prioritizes_duel_jobs_before_qualification(monkeypatch) -> None:
         lambda job, **_kw: calls.append(("qual", job.submission_id)),
     )
 
-    ran = loop_mod._tick(
+    work = loop_mod._pending_work(
         db=db,
         client=None,
         config=SimpleNamespace(
-            max_containers=3,
             require_full_pool_for_duels=False,
             pool_targets=None,
         ),
         image_tag="img",
-        stop=threading.Event(),
+        limit=3,
+        exclude=set(),
     )
 
-    assert ran == 3
+    assert [phase for _, phase, _ in work] == ["duel", "duel", "qualification"]
     assert db.duel_limit == 3
     assert db.qualification_limit == 1
+    for _, _, fn in work:
+        fn()
     assert sum(kind == "duel" for kind, _submission in calls) == 2
     assert sum(kind == "qual" for kind, _submission in calls) == 1
 
@@ -336,34 +338,55 @@ def test_report_failure_noop_on_completion(monkeypatch) -> None:
     assert fake.failures == []
 
 
-def _run_loop_and_capture_waits(monkeypatch, *, ran: int, ticks: int) -> list[float]:
-    """Drive ``run`` with a stubbed ``_tick`` returning *ran*; record sleep lengths."""
-    waits: list[float] = []
+def test_run_refills_a_free_slot_without_waiting_for_straggler(monkeypatch) -> None:
+    jobs = [
+        SolveJob(
+            task_id=f"t{i}",
+            submission_id="s1",
+            problem_statement="p",
+            repo_clone_url="u",
+            base_commit="c",
+        )
+        for i in range(3)
+    ]
+    release_first = threading.Event()
+    third_started = threading.Event()
     stop = threading.Event()
 
-    def fake_wait(seconds: float) -> bool:
-        waits.append(seconds)
-        if len(waits) >= ticks:
-            stop.set()
-        return stop.is_set()
+    class Db:
+        def next_duel_jobs(self, *_args, **_kwargs):
+            return []
 
-    monkeypatch.setattr(loop_mod, "_tick", lambda **_kw: ran)
-    stop.wait = fake_wait  # type: ignore[method-assign]
-    loop_mod.run(
-        db=object(),
-        client=None,
-        config=SimpleNamespace(max_containers=4, poll_seconds=30.0),
-        image_tag="img",
-        stop=stop,
+        def next_qualification_jobs(self, limit):
+            return jobs[:limit]
+
+    def qualify(job, **_kwargs):
+        if job.task_id == "t0":
+            release_first.wait(2)
+        elif job.task_id == "t2":
+            third_started.set()
+
+    monkeypatch.setattr(loop_mod, "_qualify", qualify)
+    thread = threading.Thread(
+        target=loop_mod.run,
+        kwargs={
+            "db": Db(),
+            "client": None,
+            "config": SimpleNamespace(
+                max_containers=2,
+                poll_seconds=0.01,
+                require_full_pool_for_duels=False,
+                pool_targets=None,
+            ),
+            "image_tag": "img",
+            "stop": stop,
+        },
     )
-    return waits
-
-
-def test_run_uses_backlog_poll_when_tick_saturates(monkeypatch) -> None:
-    waits = _run_loop_and_capture_waits(monkeypatch, ran=4, ticks=2)
-    assert waits == [loop_mod.BACKLOG_POLL_SECONDS, loop_mod.BACKLOG_POLL_SECONDS]
-
-
-def test_run_uses_idle_poll_when_tick_is_partial_or_idle(monkeypatch) -> None:
-    assert _run_loop_and_capture_waits(monkeypatch, ran=0, ticks=1) == [30.0]
-    assert _run_loop_and_capture_waits(monkeypatch, ran=3, ticks=1) == [30.0]
+    thread.start()
+    try:
+        assert third_started.wait(2)
+    finally:
+        stop.set()
+        release_first.set()
+        thread.join(2)
+    assert not thread.is_alive()
