@@ -8,6 +8,7 @@ reduced to file and hunk metadata so it cannot act as an answer key.
 from __future__ import annotations
 
 import json
+import shlex
 from dataclasses import dataclass
 from typing import Any
 
@@ -101,7 +102,12 @@ def _reference_patch_hint(reference_patch: str) -> str:
     current_file = ""
     for line in reference_patch.splitlines():
         if line.startswith("diff --git "):
-            parts = line.split()
+            # Git quotes whitespace-bearing paths; shlex preserves each complete
+            # path instead of splitting it into fake files at spaces.
+            try:
+                parts = shlex.split(line)
+            except ValueError:
+                parts = line.split()
             if len(parts) >= 4:
                 current_file = parts[3][2:] if parts[3].startswith("b/") else parts[3]
                 files.setdefault(
@@ -115,7 +121,11 @@ def _reference_patch_hint(reference_patch: str) -> str:
         )
         if line.startswith("@@"):
             if len(entry["hunks"]) < 12:
-                entry["hunks"].append(line[:240])
+                # Keep line ranges only. Text after the closing @@ is pre-image
+                # context (often a function signature), not reference metadata.
+                ranges, separator, _context = line[2:].partition("@@")
+                hunk = f"@@{ranges}@@" if separator else line
+                entry["hunks"].append(hunk[:240])
         elif line.startswith("+") and not line.startswith("+++"):
             entry["additions"] += 1
         elif line.startswith("-") and not line.startswith("---"):

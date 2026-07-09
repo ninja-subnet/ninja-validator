@@ -6,7 +6,7 @@ flowchart LR
     cw(["chain-watcher"])
     tg(["task-generator"])
     ts(["task-solver<br/>runs agents in sandboxes"])
-    sc(["task-screener<br/>single-candidate LLM score"])
+    sc(["task-screener<br/>shadow / enforce score"])
     jd(["judge"])
     dr(["duel-resolver"])
 
@@ -25,11 +25,12 @@ flowchart LR
     tasks --> ts
     ts -->|"king produces a viable<br/>qualification patch"| screening
     screening --> sc
-    sc -->|"score ≤ ceiling"| qualified
-    sc -.->|"score above ceiling →<br/>DISQUALIFIED → refill"| tg
+    sc -->|"shadow/disabled, or<br/>enforce score ≤ ceiling"| qualified
+    sc -.->|"enforced high score, injection,<br/>or exhausted failures → refill"| tg
     qualified -->|"fresh king &amp;<br/>challenger solves"| ts
     ts --> solutions
     solutions --> jd
+    screening -.->|"qualification score + patch<br/>(hashed before drift telemetry)"| jd
     jd -->|"blinded pairwise<br/>LLM comparison"| judg
     judg --> dr
     dr -->|"tally per pool;<br/>crown / defend"| reign

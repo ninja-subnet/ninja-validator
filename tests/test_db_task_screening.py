@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import datetime as dt
 import os
 from collections.abc import AsyncIterator
@@ -13,9 +14,11 @@ from dotenv import load_dotenv
 from sqlalchemy import make_url, text
 
 from tau.db.engine import async_session_scope, create_async_db_engine, create_db_engine
+from tau.db.generator import GeneratorDb, PoolDeficit
 from tau.db.models import Base, King, Submission, Task, TaskScreening
-from tau.db.status import TaskStatus
+from tau.db.status import PoolType, TaskStatus
 from tau.db.task_screening import TaskScreeningDb
+from tau.pools import PoolTargets
 
 load_dotenv(Path(__file__).resolve().parent.parent / ".env")
 _TEST_URL = os.environ.get("TAU_TEST_DATABASE_URL")
@@ -102,6 +105,7 @@ async def _add_screening(
     king_id: str,
     status: TaskStatus = TaskStatus.PENDING_SCREEN,
     outcome: str = "pending",
+    next_retry_at: dt.datetime | None = None,
 ) -> None:
     async with async_session_scope(db._sessions) as session:  # noqa: SLF001
         session.add(
@@ -127,6 +131,7 @@ async def _add_screening(
                 qualification_duration_seconds=1.25,
                 qualification_exit_reason="completed",
                 outcome=outcome,
+                next_retry_at=next_retry_at,
             )
         )
 
@@ -152,6 +157,24 @@ async def test_pending_requests_only_returns_current_king_pending_rows(
     assert [request.task_id for request in requests] == ["wanted"]
     assert requests[0].king_submission_id == "current"
     assert requests[0].qualification_solution == "solution wanted"
+
+
+async def test_pending_requests_filters_backoff_unless_explicitly_included(
+    db: TaskScreeningDb,
+) -> None:
+    now = dt.datetime.now(dt.UTC)
+    await _add_king(db, "king", at=now)
+    await _add_screening(
+        db,
+        "deferred",
+        king_id="king",
+        next_retry_at=now + dt.timedelta(minutes=5),
+    )
+
+    assert await db.pending_requests() == []
+    assert [
+        request.task_id for request in await db.pending_requests(include_deferred=True)
+    ] == ["deferred"]
 
 
 @pytest.mark.parametrize(
@@ -229,7 +252,7 @@ async def test_save_error_records_telemetry_and_leaves_task_pending(
     await _add_king(db, "king", at=dt.datetime.now(dt.UTC))
     await _add_screening(db, "task", king_id="king")
 
-    saved = await db.save_error(
+    result = await db.save_error(
         task_id="task",
         king_submission_id="king",
         max_score=0.70,
@@ -237,9 +260,16 @@ async def test_save_error_records_telemetry_and_leaves_task_pending(
         error="provider unavailable",
         attempts=4,
         duration_seconds=2.0,
+        max_failed_runs=3,
+        retry_base_seconds=60,
+        retry_max_seconds=900,
     )
 
-    assert saved is True
+    assert result.saved is True
+    assert result.exhausted is False
+    assert result.failed_runs == 1
+    assert result.cumulative_attempts == 4
+    assert result.next_retry_at is not None
     async with async_session_scope(db._sessions) as session:  # noqa: SLF001
         task = await session.get(Task, "task")
         row = await session.get(TaskScreening, "task")
@@ -247,7 +277,137 @@ async def test_save_error_records_telemetry_and_leaves_task_pending(
     assert row is not None and row.outcome == "pending"
     assert row.error == "provider unavailable"
     assert row.attempts == 4
+    assert row.failed_runs == 1
+    assert row.next_retry_at == result.next_retry_at
     assert row.king_score is None
+
+
+async def test_repeated_failures_back_off_then_atomically_disqualify(
+    db: TaskScreeningDb,
+) -> None:
+    now = dt.datetime.now(dt.UTC)
+    await _add_king(db, "king", at=now)
+    await _add_screening(db, "task", king_id="king")
+
+    first = await db.save_error(
+        task_id="task",
+        king_submission_id="king",
+        max_score=0.70,
+        model="primary/model",
+        error="first failure",
+        attempts=2,
+        duration_seconds=3.0,
+        max_failed_runs=3,
+        retry_base_seconds=60,
+        retry_max_seconds=90,
+    )
+    assert first.saved and not first.exhausted
+    assert first.next_retry_at is not None
+    first_delay = (first.next_retry_at - dt.datetime.now(dt.UTC)).total_seconds()
+    assert 55 <= first_delay <= 60
+    assert await db.pending_requests() == []
+
+    async with async_session_scope(db._sessions) as session:  # noqa: SLF001
+        row = await session.get(TaskScreening, "task", with_for_update=True)
+        assert row is not None
+        row.next_retry_at = now - dt.timedelta(seconds=1)
+
+    second = await db.save_error(
+        task_id="task",
+        king_submission_id="king",
+        max_score=0.70,
+        model="fallback/model",
+        error="second failure",
+        attempts=3,
+        duration_seconds=4.0,
+        max_failed_runs=3,
+        retry_base_seconds=60,
+        retry_max_seconds=90,
+    )
+    assert second.saved and not second.exhausted
+    assert second.next_retry_at is not None
+    second_delay = (second.next_retry_at - dt.datetime.now(dt.UTC)).total_seconds()
+    assert 85 <= second_delay <= 90  # 120s exponential delay capped at 90s
+
+    async with async_session_scope(db._sessions) as session:  # noqa: SLF001
+        row = await session.get(TaskScreening, "task", with_for_update=True)
+        assert row is not None
+        row.next_retry_at = now - dt.timedelta(seconds=1)
+
+    third = await db.save_error(
+        task_id="task",
+        king_submission_id="king",
+        max_score=0.70,
+        model="fallback/model",
+        error="third failure",
+        attempts=1,
+        duration_seconds=5.0,
+        max_failed_runs=3,
+        retry_base_seconds=60,
+        retry_max_seconds=90,
+    )
+    assert third.saved and third.exhausted
+    assert third.failed_runs == 3
+    assert third.cumulative_attempts == 6
+    assert third.next_retry_at is None
+
+    async with async_session_scope(db._sessions) as session:  # noqa: SLF001
+        task = await session.get(Task, "task")
+        row = await session.get(TaskScreening, "task")
+    assert task is not None and task.status_id == int(TaskStatus.DISQUALIFIED)
+    assert row is not None
+    assert row.outcome == "disqualified"
+    assert row.reason == "screening_exhausted"
+    assert row.error == "third failure"
+    assert row.attempts == 6
+    assert row.failed_runs == 3
+    assert row.score_duration_seconds == pytest.approx(12.0)
+    assert row.next_retry_at is None
+
+    generator = GeneratorDb(_TEST_URL)
+    try:
+        deficits = await generator.pending_pool_deficits(
+            PoolTargets(pool_one=1, pool_two=1)
+        )
+    finally:
+        await generator.aclose()
+    assert PoolDeficit("king", PoolType.POOL_ONE, 1) in deficits
+
+
+async def test_simultaneous_worker_failures_count_once_per_backoff_window(
+    db: TaskScreeningDb,
+) -> None:
+    await _add_king(db, "king", at=dt.datetime.now(dt.UTC))
+    await _add_screening(db, "task", king_id="king")
+
+    results = await asyncio.gather(
+        *(
+            db.save_error(
+                task_id="task",
+                king_submission_id="king",
+                max_score=0.70,
+                model=f"worker-{index}",
+                error="shared provider outage",
+                attempts=1,
+                duration_seconds=1.0,
+                max_failed_runs=3,
+                retry_base_seconds=60,
+                retry_max_seconds=900,
+            )
+            for index in range(3)
+        )
+    )
+
+    assert sum(result.saved for result in results) == 1
+    assert not any(result.exhausted for result in results)
+    async with async_session_scope(db._sessions) as session:  # noqa: SLF001
+        task = await session.get(Task, "task")
+        row = await session.get(TaskScreening, "task")
+    assert task is not None and task.status_id == int(TaskStatus.PENDING_SCREEN)
+    assert row is not None
+    assert row.failed_runs == 1
+    assert row.attempts == 1
+    assert row.next_retry_at is not None
 
 
 async def test_stale_result_after_king_change_is_ignored(
@@ -335,7 +495,7 @@ async def test_late_retry_error_cannot_overwrite_final_decision(
         duration_seconds=0.1,
     )
 
-    saved = await db.save_error(
+    result = await db.save_error(
         task_id="task",
         king_submission_id="king",
         max_score=0.70,
@@ -343,9 +503,12 @@ async def test_late_retry_error_cannot_overwrite_final_decision(
         error="late timeout",
         attempts=2,
         duration_seconds=1.0,
+        max_failed_runs=3,
+        retry_base_seconds=60,
+        retry_max_seconds=900,
     )
 
-    assert saved is False
+    assert result.saved is False
     async with async_session_scope(db._sessions) as session:  # noqa: SLF001
         row = await session.get(TaskScreening, "task")
     assert row is not None

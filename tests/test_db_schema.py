@@ -20,7 +20,11 @@ from tau.db.models import (
 
 def test_task_status_values_are_stable() -> None:
     # These ints are persisted in tasks.status_id — they must not drift.
-    assert (TaskStatus.CANDIDATE, TaskStatus.QUALIFIED, TaskStatus.DISQUALIFIED) == (0, 1, 2)
+    assert (TaskStatus.CANDIDATE, TaskStatus.QUALIFIED, TaskStatus.DISQUALIFIED) == (
+        0,
+        1,
+        2,
+    )
     assert TaskStatus.PENDING_SCREEN == 3
 
 
@@ -90,7 +94,9 @@ def test_submission_status_has_check_constraint_matching_the_enum() -> None:
         if isinstance(c, CheckConstraint)
     }
     assert "ck_submissions_status_id" in checks
-    assert all(str(s.value) in checks["ck_submissions_status_id"] for s in SubmissionStatus)
+    assert all(
+        str(s.value) in checks["ck_submissions_status_id"] for s in SubmissionStatus
+    )
 
 
 def test_submission_agent_files_is_manifest_text_not_code_payload() -> None:
@@ -144,6 +150,8 @@ def test_task_screening_table_shape_and_foreign_keys() -> None:
         "rationale",
         "error",
         "attempts",
+        "failed_runs",
+        "next_retry_at",
         "score_duration_seconds",
         "created_at",
         "updated_at",
@@ -155,6 +163,8 @@ def test_task_screening_table_shape_and_foreign_keys() -> None:
         "qualification_duration_seconds",
         "qualification_exit_reason",
         "outcome",
+        "attempts",
+        "failed_runs",
         "created_at",
         "updated_at",
     ):
@@ -180,14 +190,31 @@ def test_task_screening_checks_bound_scores_and_outcomes() -> None:
     assert "ck_task_screenings_king_score" in checks
     assert "ck_task_screenings_max_score" in checks
     assert "ck_task_screenings_outcome" in checks
+    assert "ck_task_screenings_attempts" in checks
+    assert "ck_task_screenings_failed_runs" in checks
     for outcome in ("pending", "qualified", "disqualified"):
         assert outcome in checks["ck_task_screenings_outcome"]
+    assert "attempts >= 0" in checks["ck_task_screenings_attempts"]
+    assert "failed_runs >= 0" in checks["ck_task_screenings_failed_runs"]
+
+
+def test_task_screening_has_pending_retry_index() -> None:
+    index = next(
+        index
+        for index in TaskScreening.__table__.indexes
+        if index.name == "ix_task_screenings_pending_retry"
+    )
+    assert [column.name for column in index.columns] == ["outcome", "next_retry_at"]
 
 
 def test_challenge_status_values_are_stable() -> None:
     # Persisted in challenges.status; the active-pool values MUST equal PoolType so
     # the judge gate (task.pool_type == challenge.status) holds.
-    assert (ChallengeStatus.CLOSED, ChallengeStatus.POOL_ONE, ChallengeStatus.POOL_TWO) == (
+    assert (
+        ChallengeStatus.CLOSED,
+        ChallengeStatus.POOL_ONE,
+        ChallengeStatus.POOL_TWO,
+    ) == (
         0,
         1,
         2,

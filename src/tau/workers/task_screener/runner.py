@@ -1,7 +1,8 @@
 """Retry and total-time policy around one independent task score.
 
 Unlike duel judging, exhaustion never fabricates a neutral score: ``result`` is
-``None`` and ``error`` is set so the DB layer can retain ``PENDING_SCREEN``.
+``None`` and ``error`` is set so the DB layer can back off and, after a bounded
+number of failed runs, disqualify the task.
 """
 
 from __future__ import annotations
@@ -54,6 +55,7 @@ async def screen_with_fallback(
     clients: Sequence[LLMClient],
     attempts: int,
     total_timeout_seconds: float,
+    per_attempt_timeout_seconds: float | None = None,
 ) -> ScreenRun:
     """Score with retries, returning an explicit retryable failure on exhaustion."""
     counter = _AttemptCounter()
@@ -67,6 +69,7 @@ async def screen_with_fallback(
                 candidate,
                 clients=clients,
                 attempts=attempts,
+                per_attempt_timeout_seconds=per_attempt_timeout_seconds,
                 counter=counter,
             ),
             timeout=total_timeout_seconds,
@@ -90,19 +93,46 @@ async def screen_with_retries(
     *,
     clients: Sequence[LLMClient],
     attempts: int,
+    per_attempt_timeout_seconds: float | None = None,
     counter: _AttemptCounter | None = None,
 ) -> ScreeningResult:
     last_error: str | None = None
     attempts = max(1, attempts)
-    for client in clients:
-        for attempt in range(1, attempts + 1):
+    disabled_routes: set[int] = set()
+    # Interleave routes by attempt. A primary timeout therefore gives the fallback
+    # route a chance within the shared total budget instead of spending every retry
+    # on the primary first.
+    for attempt in range(1, attempts + 1):
+        for route_index, client in enumerate(clients):
+            if route_index in disabled_routes:
+                continue
             if counter is not None:
                 counter.tick(client.model)
             try:
-                result = await score_candidate(task, candidate, client=client)
+                call = score_candidate(task, candidate, client=client)
+                result = (
+                    await call
+                    if per_attempt_timeout_seconds is None
+                    else await asyncio.wait_for(
+                        call, timeout=per_attempt_timeout_seconds
+                    )
+                )
                 if result.is_blocked and counter is not None:
                     counter.retract_static_block()
                 return result
+            except TimeoutError:
+                if per_attempt_timeout_seconds is None:
+                    detail = "timed out"
+                else:
+                    detail = f"timed out after {per_attempt_timeout_seconds:g}s"
+                last_error = f"{client.model}: {detail}"
+                log.warning(
+                    "task screen attempt failed model=%s attempt=%s/%s: %s",
+                    client.model,
+                    attempt,
+                    attempts,
+                    detail,
+                )
             except Exception as exc:
                 last_error = f"{client.model}: {exc}"
                 log.warning(
@@ -113,7 +143,7 @@ async def screen_with_retries(
                     exc,
                 )
                 if _is_route_error(str(exc)):
-                    break
+                    disabled_routes.add(route_index)
 
     raise RetryError(last_error or "no task screening clients configured")
 

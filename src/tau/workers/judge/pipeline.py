@@ -16,7 +16,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass, field
 
 from tau.axiom import get_axiom
-from tau.db import JudgeDb, JudgeRequest
+from tau.db import JudgeDb, JudgeRequest, TaskScreenDuelComparison
 from tau.judging import Solution, Task
 from tau.openrouter import LLMClient
 
@@ -139,7 +139,7 @@ async def _judge_and_save(
         attempts=config.attempts,
         total_timeout_seconds=config.total_timeout_seconds,
     )
-    await db.save_judgment(
+    comparison = await db.save_judgment(
         task,
         king_solution,
         challenger_solution,
@@ -155,6 +155,8 @@ async def _judge_and_save(
         run.duration_seconds,
     )
     _emit_judgment(task, king_solution, challenger_solution, run)
+    if comparison is not None:
+        _emit_task_screen_duel_comparison(comparison)
 
 
 def _emit_judgment(
@@ -183,6 +185,31 @@ def _emit_judgment(
         )
     else:
         get_axiom().info(source="judge", event_type="judgment_saved", **fields)
+
+
+def _emit_task_screen_duel_comparison(
+    comparison: TaskScreenDuelComparison,
+) -> None:
+    """Emit non-punitive drift telemetry; downstream analysis needs many samples."""
+    get_axiom().info(
+        source="judge",
+        event_type="task_screen_duel_comparison",
+        task_id=comparison.task_id,
+        king_submission_id=comparison.king_submission_id,
+        challenger_submission_id=comparison.challenger_submission_id,
+        screening_king_score=comparison.screening_king_score,
+        duel_king_score=comparison.duel_king_score,
+        duel_minus_screen_king_score_delta=(
+            comparison.duel_minus_screen_king_score_delta
+        ),
+        screening_model=comparison.screening_model,
+        duel_model=comparison.duel_model,
+        qualification_patch_sha256=comparison.qualification_patch_sha256,
+        duel_patch_sha256=comparison.duel_patch_sha256,
+        qualification_patch_matches_duel_patch=(
+            comparison.qualification_patch_matches_duel_patch
+        ),
+    )
 
 
 async def _sleep_until_stop(stop: asyncio.Event, seconds: float) -> None:

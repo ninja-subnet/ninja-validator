@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 from collections.abc import Mapping
 from dataclasses import dataclass, field
+from enum import StrEnum
 from typing import Any
 
 from tau.task_screening import DEFAULT_SCREENING_MODEL
@@ -16,9 +17,18 @@ _DEFAULT_PROVIDER_ONLY = ("z-ai/fp8",)
 _DEFAULT_FALLBACK_PROVIDER_ONLY = ("atlas-cloud/fp8",)
 
 
+class TaskScreenMode(StrEnum):
+    """How successful task scores affect admission to the duel pool."""
+
+    DISABLED = "disabled"
+    SHADOW = "shadow"
+    ENFORCE = "enforce"
+
+
 @dataclass(frozen=True, slots=True)
 class TaskScreenerConfig:
-    openrouter_api_key: str
+    openrouter_api_key: str = ""
+    mode: TaskScreenMode = TaskScreenMode.SHADOW
     model: str = DEFAULT_SCREENING_MODEL
     fallback_models: tuple[str, ...] = _FALLBACK_MODELS
     provider: dict[str, Any] | None = field(default_factory=lambda: _default_provider())
@@ -29,15 +39,24 @@ class TaskScreenerConfig:
     max_king_score: float = 0.70
     temperature: float = 0
     top_p: float = 1
-    max_tokens: int = 4_096
+    max_tokens: int = 32_000
     timeout_seconds: int = 120
     total_timeout_seconds: float = 300.0
     reasoning: dict[str, Any] | None = field(default_factory=lambda: dict(_REASONING))
     concurrency: int = 5
     poll_seconds: float = 10.0
+    max_failed_runs: int = 3
+    retry_base_seconds: float = 60.0
+    retry_max_seconds: float = 900.0
 
     def __post_init__(self) -> None:
-        if not self.openrouter_api_key:
+        try:
+            mode = TaskScreenMode(self.mode)
+        except ValueError as exc:
+            choices = ", ".join(member.value for member in TaskScreenMode)
+            raise ValueError(f"mode must be one of: {choices}") from exc
+        object.__setattr__(self, "mode", mode)
+        if mode is not TaskScreenMode.DISABLED and not self.openrouter_api_key:
             raise ValueError("openrouter_api_key is required")
         if not 0 <= self.max_king_score <= 1:
             raise ValueError("max_king_score must be between 0 and 1")
@@ -53,17 +72,32 @@ class TaskScreenerConfig:
             raise ValueError("total_timeout_seconds must be positive")
         if self.poll_seconds <= 0:
             raise ValueError("poll_seconds must be positive")
+        if self.max_failed_runs < 1:
+            raise ValueError("max_failed_runs must be >= 1")
+        if self.retry_base_seconds <= 0:
+            raise ValueError("retry_base_seconds must be positive")
+        if self.retry_max_seconds < self.retry_base_seconds:
+            raise ValueError("retry_max_seconds must be >= retry_base_seconds")
 
     @classmethod
     def from_env(cls, environ: Mapping[str, str] | None = None) -> TaskScreenerConfig:
         """Build config from ``OPENROUTER_API_KEY`` + ``TAU_TASK_SCREEN_*``."""
         env = os.environ if environ is None else environ
+        raw_mode = env_str(
+            env, "TAU_TASK_SCREEN_MODE", TaskScreenMode.SHADOW.value
+        ).lower()
+        try:
+            mode = TaskScreenMode(raw_mode)
+        except ValueError as exc:
+            choices = ", ".join(member.value for member in TaskScreenMode)
+            raise ValueError(f"TAU_TASK_SCREEN_MODE must be one of: {choices}") from exc
         api_key = env_str(env, "OPENROUTER_API_KEY", "")
-        if not api_key:
+        if mode is not TaskScreenMode.DISABLED and not api_key:
             raise OSError("OPENROUTER_API_KEY not set")
-        d = cls(openrouter_api_key=api_key)
+        d = cls(openrouter_api_key=api_key, mode=mode)
         return cls(
             openrouter_api_key=api_key,
+            mode=mode,
             model=env_str(env, "TAU_TASK_SCREEN_MODEL", d.model),
             fallback_models=_env_csv(
                 env, "TAU_TASK_SCREEN_FALLBACK_MODELS", d.fallback_models
@@ -87,6 +121,15 @@ class TaskScreenerConfig:
             ),
             concurrency=env_int(env, "TAU_TASK_SCREEN_CONCURRENCY", d.concurrency),
             poll_seconds=env_float(env, "TAU_TASK_SCREEN_POLL_SECONDS", d.poll_seconds),
+            max_failed_runs=env_int(
+                env, "TAU_TASK_SCREEN_MAX_FAILED_RUNS", d.max_failed_runs
+            ),
+            retry_base_seconds=env_float(
+                env, "TAU_TASK_SCREEN_RETRY_BASE_SECONDS", d.retry_base_seconds
+            ),
+            retry_max_seconds=env_float(
+                env, "TAU_TASK_SCREEN_RETRY_MAX_SECONDS", d.retry_max_seconds
+            ),
         )
 
 

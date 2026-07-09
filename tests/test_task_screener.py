@@ -8,10 +8,10 @@ from dataclasses import replace
 
 import pytest
 
-from tau.db.task_screening import TaskScreenRequest
+from tau.db.task_screening import ScreeningFailureSave, TaskScreenRequest
 from tau.openrouter import RenderablePrompt
 from tau.task_screening import Candidate, Task
-from tau.workers.task_screener.config import TaskScreenerConfig
+from tau.workers.task_screener.config import TaskScreenerConfig, TaskScreenMode
 from tau.workers.task_screener.main import _build_screen_clients
 from tau.workers.task_screener.pipeline import (
     LoopState,
@@ -59,17 +59,25 @@ class FakeDb:
         self.requests = requests or []
         self.decisions: list[dict] = []
         self.errors: list[dict] = []
+        self.include_deferred: list[bool] = []
 
-    async def pending_requests(self) -> list[TaskScreenRequest]:
+    async def pending_requests(
+        self, *, include_deferred: bool = False
+    ) -> list[TaskScreenRequest]:
+        self.include_deferred.append(include_deferred)
         return list(self.requests)
 
     async def save_decision(self, **values) -> bool:
         self.decisions.append(values)
         return True
 
-    async def save_error(self, **values) -> bool:
+    async def save_error(self, **values) -> ScreeningFailureSave:
         self.errors.append(values)
-        return True
+        return ScreeningFailureSave(
+            saved=True,
+            failed_runs=1,
+            cumulative_attempts=values["attempts"],
+        )
 
 
 def _config(**changes) -> TaskScreenerConfig:
@@ -90,15 +98,21 @@ def _response(score: int) -> str:
     return json.dumps({"score": score, "rationale": f"coverage is {score}%"})
 
 
-def test_config_defaults_to_strict_seventy_percent_gate() -> None:
+def test_config_defaults_to_shadow_mode_with_production_judge_budget() -> None:
     config = TaskScreenerConfig.from_env({"OPENROUTER_API_KEY": "k"})
 
+    assert config.mode is TaskScreenMode.SHADOW
     assert config.model == "z-ai/glm-5.2"
     assert config.fallback_models == ("z-ai/glm-5.2",)
     assert config.max_king_score == 0.70
-    assert config.max_tokens == 4_096
+    assert config.max_tokens == 32_000
     assert config.attempts == 4
+    assert config.timeout_seconds == 120
+    assert config.total_timeout_seconds == 300
     assert config.concurrency == 5
+    assert config.max_failed_runs == 3
+    assert config.retry_base_seconds == 60
+    assert config.retry_max_seconds == 900
     assert config.provider == {"only": ["z-ai/fp8"], "allow_fallbacks": False}
     assert config.fallback_provider == {
         "only": ["atlas-cloud/fp8"],
@@ -110,6 +124,7 @@ def test_config_reads_task_screen_env_and_provider_routes() -> None:
     config = TaskScreenerConfig.from_env(
         {
             "OPENROUTER_API_KEY": "k",
+            "TAU_TASK_SCREEN_MODE": "enforce",
             "TAU_TASK_SCREEN_MODEL": "primary/model",
             "TAU_TASK_SCREEN_FALLBACK_MODELS": "fallback/a, fallback/b",
             "TAU_TASK_SCREEN_MAX_KING_SCORE": "0.75",
@@ -119,6 +134,9 @@ def test_config_reads_task_screen_env_and_provider_routes() -> None:
             "TAU_TASK_SCREEN_TOTAL_TIMEOUT": "90",
             "TAU_TASK_SCREEN_CONCURRENCY": "3",
             "TAU_TASK_SCREEN_POLL_SECONDS": "4.5",
+            "TAU_TASK_SCREEN_MAX_FAILED_RUNS": "5",
+            "TAU_TASK_SCREEN_RETRY_BASE_SECONDS": "10",
+            "TAU_TASK_SCREEN_RETRY_MAX_SECONDS": "80",
             "TAU_TASK_SCREEN_PROVIDER_ORDER": "provider/a,provider/b",
             "TAU_TASK_SCREEN_PROVIDER_ALLOW_FALLBACKS": "true",
             "TAU_TASK_SCREEN_FALLBACK_PROVIDER_ONLY": "provider/c",
@@ -126,6 +144,7 @@ def test_config_reads_task_screen_env_and_provider_routes() -> None:
         }
     )
 
+    assert config.mode is TaskScreenMode.ENFORCE
     assert config.model == "primary/model"
     assert config.fallback_models == ("fallback/a", "fallback/b")
     assert config.max_king_score == 0.75
@@ -135,6 +154,9 @@ def test_config_reads_task_screen_env_and_provider_routes() -> None:
     assert config.total_timeout_seconds == 90
     assert config.concurrency == 3
     assert config.poll_seconds == 4.5
+    assert config.max_failed_runs == 5
+    assert config.retry_base_seconds == 10
+    assert config.retry_max_seconds == 80
     assert config.provider == {
         "order": ["provider/a", "provider/b"],
         "allow_fallbacks": True,
@@ -149,6 +171,26 @@ def test_config_reads_task_screen_env_and_provider_routes() -> None:
 def test_config_rejects_out_of_range_threshold(threshold: float) -> None:
     with pytest.raises(ValueError, match="between 0 and 1"):
         _config(max_king_score=threshold)
+
+
+def test_disabled_mode_requires_no_api_key_and_builds_no_clients() -> None:
+    config = TaskScreenerConfig.from_env({"TAU_TASK_SCREEN_MODE": "disabled"})
+
+    assert config.mode is TaskScreenMode.DISABLED
+    assert config.openrouter_api_key == ""
+    assert _build_screen_clients(config) == []
+
+
+def test_scoring_modes_still_require_an_api_key() -> None:
+    with pytest.raises(OSError, match="OPENROUTER_API_KEY"):
+        TaskScreenerConfig.from_env({"TAU_TASK_SCREEN_MODE": "shadow"})
+
+
+def test_config_rejects_unknown_mode() -> None:
+    with pytest.raises(ValueError, match="disabled, shadow, enforce"):
+        TaskScreenerConfig.from_env(
+            {"OPENROUTER_API_KEY": "k", "TAU_TASK_SCREEN_MODE": "surprise"}
+        )
 
 
 def test_clients_are_deterministic_and_use_distinct_routes() -> None:
@@ -222,6 +264,26 @@ async def test_route_error_moves_directly_to_fallback_client() -> None:
     assert run.attempts == 2
 
 
+async def test_hanging_primary_is_timed_out_before_fallback_route() -> None:
+    primary = HangingClient()
+    fallback = FakeClient(_response(60), model="fallback/model")
+
+    run = await screen_with_fallback(
+        Task("task", "problem"),
+        Candidate("king", "+patch"),
+        clients=[primary, fallback],
+        attempts=4,
+        total_timeout_seconds=1,
+        per_attempt_timeout_seconds=0.01,
+    )
+
+    assert run.result is not None and run.result.model == "fallback/model"
+    assert run.attempts == 2
+    assert primary.calls == 1
+    assert primary.cancelled.is_set()
+    assert fallback.calls == 1
+
+
 @pytest.mark.parametrize(
     ("score", "expected_outcome"),
     [(70, "qualified"), (71, "disqualified")],
@@ -231,13 +293,42 @@ async def test_worker_uses_strict_greater_than_threshold(
 ) -> None:
     db = FakeDb()
 
-    await _screen_and_save(db, [FakeClient(_response(score))], _config(), _request())
+    await _screen_and_save(
+        db,
+        [FakeClient(_response(score))],
+        _config(mode=TaskScreenMode.ENFORCE),
+        _request(),
+    )
 
     assert db.errors == []
     assert len(db.decisions) == 1
     assert db.decisions[0]["outcome"] == expected_outcome
     assert db.decisions[0]["king_score"] == score / 100
     assert db.decisions[0]["max_score"] == 0.70
+
+
+async def test_shadow_mode_records_high_score_but_qualifies() -> None:
+    db = FakeDb()
+
+    await _screen_and_save(db, [FakeClient(_response(95))], _config(), _request())
+
+    assert db.errors == []
+    assert db.decisions[0]["outcome"] == "qualified"
+    assert db.decisions[0]["reason"] == "shadow_score_recorded"
+    assert db.decisions[0]["king_score"] == 0.95
+
+
+async def test_disabled_mode_auto_qualifies_without_clients() -> None:
+    db = FakeDb()
+    config = TaskScreenerConfig(mode=TaskScreenMode.DISABLED)
+
+    await _screen_and_save(db, [], config, _request())
+
+    assert db.errors == []
+    assert db.decisions[0]["outcome"] == "qualified"
+    assert db.decisions[0]["reason"] == "screening_disabled"
+    assert db.decisions[0]["king_score"] is None
+    assert db.decisions[0]["attempts"] == 0
 
 
 async def test_prompt_injection_is_explicitly_disqualified_without_llm_call() -> None:
@@ -276,6 +367,9 @@ async def test_transport_failure_records_error_and_never_admits_task() -> None:
     assert "offline" in db.errors[0]["error"]
     assert db.errors[0]["attempts"] == 2
     assert db.errors[0]["max_score"] == 0.70
+    assert db.errors[0]["max_failed_runs"] == 3
+    assert db.errors[0]["retry_base_seconds"] == 60
+    assert db.errors[0]["retry_max_seconds"] == 900
 
 
 async def test_reconcile_cancels_obsolete_inflight_screen() -> None:
@@ -296,3 +390,35 @@ async def test_reconcile_cancels_obsolete_inflight_screen() -> None:
     assert state.inflight == {}
     assert db.decisions == []
     assert db.errors == []
+
+
+async def test_reconcile_reuses_cancelled_slot_in_the_same_tick() -> None:
+    first = _request()
+    second = replace(_request(), task_id="task-2")
+    db = FakeDb([first])
+    client = HangingClient()
+    state = LoopState()
+    config = _config(concurrency=1)
+
+    await _reconcile(db, [client], config, state)
+    await asyncio.wait_for(client.started.wait(), timeout=1)
+
+    db.requests = [second]
+    await _reconcile(db, [client], config, state)
+
+    assert set(state.inflight) == {(second.task_id, second.king_submission_id)}
+    for task in state.inflight.values():
+        task.cancel()
+    await asyncio.gather(*state.inflight.values(), return_exceptions=True)
+
+
+async def test_disabled_reconcile_includes_deferred_rows() -> None:
+    db = FakeDb([_request()])
+    state = LoopState()
+    config = TaskScreenerConfig(mode=TaskScreenMode.DISABLED)
+
+    await _reconcile(db, [], config, state)
+    await asyncio.gather(*state.inflight.values())
+
+    assert db.include_deferred == [True]
+    assert db.decisions[0]["reason"] == "screening_disabled"

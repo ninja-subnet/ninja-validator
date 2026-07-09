@@ -40,7 +40,19 @@ def upgrade() -> None:
         sa.Column("model", sa.Text(), nullable=True),
         sa.Column("rationale", sa.Text(), nullable=True),
         sa.Column("error", sa.Text(), nullable=True),
-        sa.Column("attempts", sa.SmallInteger(), nullable=True),
+        sa.Column(
+            "attempts",
+            sa.SmallInteger(),
+            server_default=sa.text("0"),
+            nullable=False,
+        ),
+        sa.Column(
+            "failed_runs",
+            sa.SmallInteger(),
+            server_default=sa.text("0"),
+            nullable=False,
+        ),
+        sa.Column("next_retry_at", sa.DateTime(timezone=True), nullable=True),
         sa.Column("score_duration_seconds", sa.Float(), nullable=True),
         sa.Column(
             "created_at",
@@ -78,8 +90,12 @@ def upgrade() -> None:
             name="ck_task_screenings_outcome",
         ),
         sa.CheckConstraint(
-            "attempts IS NULL OR attempts >= 0",
+            "attempts >= 0",
             name="ck_task_screenings_attempts",
+        ),
+        sa.CheckConstraint(
+            "failed_runs >= 0",
+            name="ck_task_screenings_failed_runs",
         ),
         sa.CheckConstraint(
             "score_duration_seconds IS NULL OR score_duration_seconds >= 0",
@@ -91,9 +107,15 @@ def upgrade() -> None:
         "task_screenings",
         ["king_submission_id"],
     )
+    op.create_index(
+        "ix_task_screenings_pending_retry",
+        "task_screenings",
+        ["outcome", "next_retry_at"],
+    )
 
 
 def downgrade() -> None:
+    op.drop_index("ix_task_screenings_pending_retry", table_name="task_screenings")
     op.drop_index("ix_task_screenings_king_submission_id", table_name="task_screenings")
     op.drop_table("task_screenings")
 

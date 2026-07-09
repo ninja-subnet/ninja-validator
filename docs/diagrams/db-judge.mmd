@@ -5,16 +5,22 @@ flowchart LR
     kings[("kings")]
     chal[("challenges")]
     tsol[("duel_task_solutions")]
+    screen[("task_screenings")]
     judg[("judgements")]
+    axiom["Axiom telemetry"]
 
     jd -. "R  QUALIFIED tasks" .-> tasks
     jd -. "R  reigning king" .-> kings
     jd -. "R  active challenges" .-> chal
     jd -. "R  king &amp; challenger solutions" .-> tsol
     jd -. "R  pairs with no verdict yet" .-> judg
+    jd -. "R  matching qualification<br/>score + patch" .-> screen
     jd == "W  INSERT llm_winner, king_score,<br/>challenger_score, error?<br/>ON CONFLICT DO NOTHING" ==> judg
+    jd -. "score delta + model IDs + patch<br/>SHA/equality (never patch bodies)" .-> axiom
 
     classDef worker fill:#2563eb,stroke:#1e3a8a,color:#fff;
     classDef store fill:#f59e0b,stroke:#b45309,color:#111;
+    classDef ext fill:#e5e7eb,stroke:#6b7280,color:#111;
     class jd worker;
-    class tasks,kings,chal,tsol,judg store;
+    class tasks,kings,chal,tsol,screen,judg store;
+    class axiom ext;

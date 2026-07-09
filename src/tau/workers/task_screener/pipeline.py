@@ -12,7 +12,7 @@ from tau.db.task_screening import TaskScreenRequest, TaskScreeningDb
 from tau.openrouter import LLMClient
 from tau.task_screening import Candidate, ScreeningResult, Task
 
-from .config import TaskScreenerConfig
+from .config import TaskScreenerConfig, TaskScreenMode
 from .runner import ScreenRun, screen_with_fallback
 
 log = logging.getLogger(__name__)
@@ -30,7 +30,8 @@ async def run_task_screener(
     """Poll until stopped and cancel calls whose task/king is no longer pending."""
     state = LoopState()
     log.info(
-        "task screener running: max king score %.3f, concurrency %d, poll %.1fs",
+        "task screener running: mode %s, max king score %.3f, concurrency %d, poll %.1fs",
+        config.mode,
         config.max_king_score,
         config.concurrency,
         config.poll_seconds,
@@ -60,12 +61,28 @@ async def _reconcile(
     state: LoopState,
 ) -> None:
     inflight = state.inflight
-    valid = {_key(req): req for req in await db.pending_requests()}
+    valid = {
+        _key(req): req
+        for req in await db.pending_requests(
+            include_deferred=config.mode is TaskScreenMode.DISABLED
+        )
+    }
 
+    obsolete: list[tuple[ScreenKey, asyncio.Task[None]]] = []
     for key, task in list(inflight.items()):
         if key not in valid:
             log.info("cancelling obsolete task screen for task %s", key[0])
             task.cancel()
+            obsolete.append((key, task))
+
+    if obsolete:
+        # Cancellation callbacks are scheduled asynchronously. Await and remove the
+        # exact old task now so obsolete calls cannot occupy concurrency slots for
+        # another poll tick (or remove a later replacement with the same key).
+        await asyncio.gather(*(task for _, task in obsolete), return_exceptions=True)
+        for key, task in obsolete:
+            if inflight.get(key) is task:
+                inflight.pop(key, None)
 
     for key, request in valid.items():
         if key in inflight:
@@ -96,7 +113,8 @@ def _on_done(
     task: asyncio.Task[None],
     inflight: dict[ScreenKey, asyncio.Task[None]],
 ) -> None:
-    inflight.pop(key, None)
+    if inflight.get(key) is task:
+        inflight.pop(key, None)
     if task.cancelled():
         return
     exc = task.exception()
@@ -117,6 +135,10 @@ async def _screen_and_save(
     config: TaskScreenerConfig,
     request: TaskScreenRequest,
 ) -> None:
+    if config.mode is TaskScreenMode.DISABLED:
+        await _save_disabled(db, config, request)
+        return
+
     run = await screen_with_fallback(
         Task(
             task_id=request.task_id,
@@ -130,13 +152,18 @@ async def _screen_and_save(
         clients=clients,
         attempts=config.attempts,
         total_timeout_seconds=config.total_timeout_seconds,
+        per_attempt_timeout_seconds=config.timeout_seconds,
     )
 
     if run.result is None:
         await _save_retryable_error(db, config, request, run)
         return
 
-    decision = _decision(run.result, max_score=config.max_king_score)
+    decision = _decision(
+        run.result,
+        max_score=config.max_king_score,
+        mode=config.mode,
+    )
     if decision is None:
         # Defensive fail-closed handling for an impossible/invalid core result.
         invalid = ScreenRun(
@@ -192,7 +219,7 @@ async def _screen_and_save(
 
 
 def _decision(
-    result: ScreeningResult, *, max_score: float
+    result: ScreeningResult, *, max_score: float, mode: TaskScreenMode
 ) -> tuple[str, float | None, str, str] | None:
     if result.is_blocked:
         reason = str(result.blocked_reason or "blocked")
@@ -206,6 +233,8 @@ def _decision(
         return "disqualified", None, reason, rationale
     if result.score is None:
         return None
+    if mode is TaskScreenMode.SHADOW:
+        return "qualified", result.score, "shadow_score_recorded", result.rationale
     if result.score > max_score:
         return "disqualified", result.score, "score_above_max", result.rationale
     return "qualified", result.score, "score_at_or_below_max", result.rationale
@@ -218,7 +247,7 @@ async def _save_retryable_error(
     run: ScreenRun,
 ) -> None:
     error = run.error or "task screening failed without an error message"
-    saved = await db.save_error(
+    result = await db.save_error(
         task_id=request.task_id,
         king_submission_id=request.king_submission_id,
         max_score=config.max_king_score,
@@ -226,24 +255,73 @@ async def _save_retryable_error(
         error=error,
         attempts=run.attempts,
         duration_seconds=run.duration_seconds,
+        max_failed_runs=config.max_failed_runs,
+        retry_base_seconds=config.retry_base_seconds,
+        retry_max_seconds=config.retry_max_seconds,
     )
     log.warning(
-        "task screen error for %s (saved=%s, remains pending): %s",
+        "task screen error for %s (saved=%s, exhausted=%s, failed_runs=%s): %s",
         request.task_id,
-        saved,
+        result.saved,
+        result.exhausted,
+        result.failed_runs,
         error,
     )
     get_axiom().warn(
         source="task-screener",
-        event_type="task_screen_retryable_error",
+        event_type=(
+            "task_screen_failed" if result.exhausted else "task_screen_retryable_error"
+        ),
         task_id=request.task_id,
         king_submission_id=request.king_submission_id,
-        saved=saved,
+        saved=result.saved,
+        exhausted=result.exhausted,
+        failed_runs=result.failed_runs,
+        cumulative_attempts=result.cumulative_attempts,
+        next_retry_at=(
+            result.next_retry_at.isoformat() if result.next_retry_at else None
+        ),
         model=run.error_model,
         attempts=run.attempts,
         duration_seconds=run.duration_seconds,
         error=error,
     )
+
+
+async def _save_disabled(
+    db: TaskScreeningDb,
+    config: TaskScreenerConfig,
+    request: TaskScreenRequest,
+) -> None:
+    saved = await db.save_decision(
+        task_id=request.task_id,
+        king_submission_id=request.king_submission_id,
+        outcome="qualified",
+        king_score=None,
+        max_score=config.max_king_score,
+        reason="screening_disabled",
+        model=None,
+        rationale=None,
+        attempts=0,
+        duration_seconds=0.0,
+    )
+    if saved:
+        log.info("task screening disabled; qualified task %s", request.task_id)
+        get_axiom().info(
+            source="task-screener",
+            event_type="task_screen_saved",
+            task_id=request.task_id,
+            king_submission_id=request.king_submission_id,
+            outcome="qualified",
+            reason="screening_disabled",
+            king_score=None,
+            max_score=config.max_king_score,
+            model=None,
+            attempts=0,
+            duration_seconds=0.0,
+        )
+    else:
+        log.info("discarded stale disabled-mode decision for task %s", request.task_id)
 
 
 async def _sleep_until_stop(stop: asyncio.Event, seconds: float) -> None:

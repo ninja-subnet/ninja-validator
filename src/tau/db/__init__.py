@@ -20,7 +20,7 @@ from .database import SqlDatabase, connect
 from .duel_resolver import DuelResolverDb
 from .engine import database_url, session_scope
 from .generator import GenerationMetrics, GeneratorDb, PoolDeficit
-from .judge import JudgeDb, JudgeRequest
+from .judge import JudgeDb, JudgeRequest, TaskScreenDuelComparison
 from .qualification import QualificationCandidate, QualificationDb
 from .solver import DuelSolveJob, SolveJob, SolverDb
 from .status import (
@@ -30,12 +30,13 @@ from .status import (
     SubmissionStatus,
     TaskStatus,
 )
-from .task_screening import TaskScreenRequest, TaskScreeningDb
+from .task_screening import ScreeningFailureSave, TaskScreenRequest, TaskScreeningDb
 from .weight_setter import WeightSetterDb
 
 __all__ = [
     "JudgeDb",
     "JudgeRequest",
+    "TaskScreenDuelComparison",
     "QualificationCandidate",
     "QualificationDb",
     "SqlDatabase",
@@ -55,6 +56,7 @@ __all__ = [
     "TaskStatus",
     "TaskScreenRequest",
     "TaskScreeningDb",
+    "ScreeningFailureSave",
     "WeightSetterDb",
     "database_url",
     "session_scope",

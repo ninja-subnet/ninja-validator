@@ -138,9 +138,10 @@ services:
     restart: unless-stopped
 
   # Task-screener worker: score the reigning king's qualification patch for each
-  # PENDING_SCREEN task. Tasks scoring above the configured ceiling are
-  # DISQUALIFIED; accepted tasks become QUALIFIED and enter duel scheduling.
-  # This is single-candidate scoring and never reads or writes duel judgements.
+  # PENDING_SCREEN task. Shadow mode (the default) records scores while admitting
+  # tasks; enforce mode DISQUALIFIES scores above the ceiling. Exhausted failures
+  # are dropped so one unscreenable task cannot stall a full-pool duel. This is
+  # single-candidate scoring and never reads or writes duel judgements.
   task-screener:
     build:
       context: .

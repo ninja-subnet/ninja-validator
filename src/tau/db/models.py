@@ -316,9 +316,7 @@ class TaskScreening(Base):
         index=True,
     )
     qualification_solution: Mapped[str] = mapped_column(Text, nullable=False)
-    qualification_duration_seconds: Mapped[float] = mapped_column(
-        Float, nullable=False
-    )
+    qualification_duration_seconds: Mapped[float] = mapped_column(Float, nullable=False)
     qualification_exit_reason: Mapped[str] = mapped_column(Text, nullable=False)
     qualification_usage_summary: Mapped[dict | None] = mapped_column(JSONB)
 
@@ -331,7 +329,16 @@ class TaskScreening(Base):
     model: Mapped[str | None] = mapped_column(Text)
     rationale: Mapped[str | None] = mapped_column(Text)
     error: Mapped[str | None] = mapped_column(Text)
-    attempts: Mapped[int | None] = mapped_column(SmallInteger)
+    # Cumulative LLM calls across every screening run. ``failed_runs`` counts
+    # whole retry cycles independently so a permanently unscreenable task has a
+    # bounded path out of PENDING_SCREEN.
+    attempts: Mapped[int] = mapped_column(
+        SmallInteger, nullable=False, default=0, server_default="0"
+    )
+    failed_runs: Mapped[int] = mapped_column(
+        SmallInteger, nullable=False, default=0, server_default="0"
+    )
+    next_retry_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True))
     score_duration_seconds: Mapped[float | None] = mapped_column(Float)
     created_at: Mapped[dt.datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
@@ -363,12 +370,21 @@ class TaskScreening(Base):
             name="ck_task_screenings_outcome",
         ),
         CheckConstraint(
-            "attempts IS NULL OR attempts >= 0",
+            "attempts >= 0",
             name="ck_task_screenings_attempts",
+        ),
+        CheckConstraint(
+            "failed_runs >= 0",
+            name="ck_task_screenings_failed_runs",
         ),
         CheckConstraint(
             "score_duration_seconds IS NULL OR score_duration_seconds >= 0",
             name="ck_task_screenings_score_duration",
+        ),
+        Index(
+            "ix_task_screenings_pending_retry",
+            "outcome",
+            "next_retry_at",
         ),
     )
 

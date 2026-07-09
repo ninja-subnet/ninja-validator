@@ -6,8 +6,8 @@ flowchart LR
     screen[("task_screenings")]
 
     sc -. "R  reigning king" .-> kings
-    sc -. "R  PENDING_SCREEN tasks" .-> tasks
-    sc -. "R  qualification patch +<br/>pending/error telemetry" .-> screen
+    sc -. "R  due PENDING_SCREEN tasks" .-> tasks
+    sc -. "R  qualification patch +<br/>attempt/failure/backoff state" .-> screen
     sc == "W  guarded status update:<br/>QUALIFIED / DISQUALIFIED" ==> tasks
     sc == "W  score, ceiling, outcome,<br/>reason, model, rationale,<br/>attempt/error telemetry" ==> screen
 

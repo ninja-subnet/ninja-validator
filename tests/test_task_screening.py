@@ -170,7 +170,23 @@ def test_prompt_summarizes_reference_without_leaking_answer_lines() -> None:
     assert "SECRET_REFERENCE_ANSWER" not in prompt
     assert "NON-SOLUTION REFERENCE SUMMARY" in prompt
     assert "parser.py (+2/-1)" in prompt
-    assert "@@ -1,2 +1,3 @@ def parse(value):" in prompt
+    assert "@@ -1,2 +1,3 @@" in prompt
+    assert "def parse(value):" not in prompt
+
+
+def test_prompt_preserves_a_quoted_reference_path_with_spaces() -> None:
+    reference = (
+        'diff --git "a/package/with space.py" "b/package/with space.py"\n'
+        '--- "a/package/with space.py"\n'
+        '+++ "b/package/with space.py"\n'
+        "@@ -1 +1 @@\n"
+        "-old\n"
+        "+new\n"
+    )
+
+    prompt = build_prompt(_task(reference_patch=reference), _candidate()).as_text()
+
+    assert "package/with space.py (+1/-1)" in prompt
 
 
 def test_prompt_marks_an_empty_patch_as_no_changes() -> None:

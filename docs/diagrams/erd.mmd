@@ -67,7 +67,9 @@ erDiagram
         text model
         text rationale
         text error
-        int attempts
+        int attempts "cumulative LLM calls"
+        int failed_runs
+        timestamptz next_retry_at
     }
     task_solutions {
         text task_id PK "FK tasks"

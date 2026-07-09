@@ -1,18 +1,27 @@
 %%{init: {"theme": "base", "themeVariables": {"fontSize": "15px"}}}%%
 flowchart TB
     start(["task-screener.main()"])
-    start --> pending["Read reigning king's PENDING_SCREEN tasks<br/>with pending task_screenings rows"]
-    pending --> reconcile["Cancel obsolete in-flight work;<br/>start up to configured concurrency"]
-    reconcile --> injection{"qualification patch contains<br/>prompt injection?"}
+    start --> pending["Read reigning king's due PENDING_SCREEN tasks<br/>where next_retry_at is null or elapsed"]
+    pending --> reconcile["Cancel + await obsolete work;<br/>start up to configured concurrency"]
+    reconcile --> mode{"TAU_TASK_SCREEN_MODE"}
+    mode -- disabled --> disabled["QUALIFIED<br/>reason = screening_disabled"]
+    mode -- shadow / enforce --> injection{"qualification patch contains<br/>prompt injection?"}
     injection -- yes --> blocked["DISQUALIFIED<br/>reason = prompt_injection"]
     injection -- no --> score["Single-candidate LLM score<br/>task + qualification patch<br/>0–100 normalized to 0–1"]
     score --> error{"all routes failed or<br/>response invalid?"}
-    error -- yes --> retry["Record error telemetry;<br/>leave PENDING_SCREEN for retry"]
-    error -- no --> ceiling{"king score &gt;<br/>TAU_TASK_SCREEN_MAX_KING_SCORE?"}
+    error -- yes --> exhausted{"failed_runs reached<br/>configured maximum?"}
+    exhausted -- no --> retry["Record cumulative attempt telemetry;<br/>set exponential-backoff next_retry_at"]
+    exhausted -- yes --> drop["DISQUALIFIED<br/>reason = screening_exhausted<br/>generator refills slot"]
+    error -- no --> shadow{"mode = shadow?"}
+    shadow -- yes --> shadowed["Record score + QUALIFIED<br/>reason = shadow_score_recorded"]
+    shadow -- no --> ceiling{"king score &gt;<br/>TAU_TASK_SCREEN_MAX_KING_SCORE?"}
     ceiling -- yes --> tooeasy["DISQUALIFIED<br/>reason = score_above_max"]
     ceiling -- no --> qualified["QUALIFIED<br/>eligible for duel solves"]
     blocked --> sleep["sleep TAU_TASK_SCREEN_POLL_SECONDS"]
+    disabled --> sleep
     retry --> sleep
+    drop --> sleep
+    shadowed --> sleep
     tooeasy --> sleep
     qualified --> sleep
     sleep --> pending
