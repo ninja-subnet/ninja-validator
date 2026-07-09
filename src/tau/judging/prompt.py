@@ -9,6 +9,7 @@ and the reference is summarized (not pasted) as privileged context, NOT a candid
 from __future__ import annotations
 
 import json
+import shlex
 from dataclasses import dataclass
 from typing import Any
 
@@ -115,10 +116,12 @@ def build_prompt(
 
 
 def _task_block(task: Task) -> dict[str, str]:
-    return {"task": _truncate_middle(task.problem_statement, MAX_TASK_CHARS)}
+    return {"task": truncate_middle(task.problem_statement, MAX_TASK_CHARS)}
 
 
-def _reference_patch_hint(reference_patch: str) -> str:
+def reference_patch_hint(
+    reference_patch: str, *, single_candidate: bool = False
+) -> str:
     """Summarize the reference as touched files + hunk headers, never its code lines.
 
     Ported from validate.py:_reference_patch_hint. Gives the judge where the
@@ -132,7 +135,13 @@ def _reference_patch_hint(reference_patch: str) -> str:
     current_file = ""
     for line in reference_patch.splitlines():
         if line.startswith("diff --git "):
-            parts = line.split()
+            if not single_candidate:
+                parts = line.split()
+            else:
+                try:
+                    parts = shlex.split(line)
+                except ValueError:
+                    parts = line.split()
             if len(parts) >= 4:
                 current_file = parts[3][2:] if parts[3].startswith("b/") else parts[3]
                 files.setdefault(current_file, {"additions": 0, "deletions": 0, "hunks": []})
@@ -142,7 +151,11 @@ def _reference_patch_hint(reference_patch: str) -> str:
         entry = files.setdefault(current_file, {"additions": 0, "deletions": 0, "hunks": []})
         if line.startswith("@@"):
             if len(entry["hunks"]) < 12:
-                entry["hunks"].append(line[:240])
+                hunk = line
+                if single_candidate:
+                    ranges, separator, _context = line[2:].partition("@@")
+                    hunk = f"@@{ranges}@@" if separator else line
+                entry["hunks"].append(hunk[:240])
         elif line.startswith("+") and not line.startswith("+++"):
             entry["additions"] += 1
         elif line.startswith("-") and not line.startswith("---"):
@@ -151,11 +164,18 @@ def _reference_patch_hint(reference_patch: str) -> str:
     if not files:
         return "(reference patch has no parseable file summary)"
 
-    lines = [
-        "NON-CANDIDATE REFERENCE SUMMARY.",
-        "Use this only as weak context for touched areas. Do not attribute these changes to Candidate A or Candidate B.",
-        "Touched files and hunk locations:",
-    ]
+    if single_candidate:
+        lines = [
+            "NON-SOLUTION REFERENCE SUMMARY.",
+            "Use only as weak context for touched areas; do not treat it as implemented code.",
+            "Touched files and hunk locations:",
+        ]
+    else:
+        lines = [
+            "NON-CANDIDATE REFERENCE SUMMARY.",
+            "Use this only as weak context for touched areas. Do not attribute these changes to Candidate A or Candidate B.",
+            "Touched files and hunk locations:",
+        ]
     omitted_files = 0
     for index, (path, entry) in enumerate(files.items()):
         if index >= 80:
@@ -169,20 +189,20 @@ def _reference_patch_hint(reference_patch: str) -> str:
     if omitted_files:
         lines.append(f"... {omitted_files} more files omitted")
 
-    return _truncate_middle("\n".join(lines), MAX_REFERENCE_HINT_CHARS)
+    return truncate_middle("\n".join(lines), MAX_REFERENCE_HINT_CHARS)
 
 
 def _candidates_block(
     candidate_a_patch: str, candidate_b_patch: str, reference_patch: str
 ) -> dict[str, str]:
     return {
-        "candidate_a_patch": _truncate_middle(
+        "candidate_a_patch": truncate_middle(
             candidate_a_patch if candidate_a_patch.strip() else "(no changes)", MAX_PATCH_CHARS
         ),
-        "candidate_b_patch": _truncate_middle(
+        "candidate_b_patch": truncate_middle(
             candidate_b_patch if candidate_b_patch.strip() else "(no changes)", MAX_PATCH_CHARS
         ),
-        "non_candidate_reference_summary": _reference_patch_hint(reference_patch),
+        "non_candidate_reference_summary": reference_patch_hint(reference_patch),
     }
 
 
@@ -190,7 +210,7 @@ def _dumps(obj: dict[str, Any]) -> str:
     return json.dumps(obj, indent=2, sort_keys=True)
 
 
-def _truncate_middle(text: str, max_chars: int) -> str:
+def truncate_middle(text: str, max_chars: int) -> str:
     """Keep head + tail, drop the middle — mirrors validate.py:_truncate_middle."""
     if len(text) <= max_chars:
         return text

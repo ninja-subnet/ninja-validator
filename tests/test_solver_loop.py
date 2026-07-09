@@ -40,26 +40,40 @@ class _FakeDb:
 
 def _job() -> SolveJob:
     return SolveJob(
-        task_id="t1", submission_id="s1", problem_statement="p",
-        repo_clone_url="u", base_commit="c",
+        task_id="t1",
+        submission_id="s1",
+        problem_statement="p",
+        repo_clone_url="u",
+        base_commit="c",
     )
 
 
 def _duel_job() -> DuelSolveJob:
     return DuelSolveJob(
-        task_id="t1", submission_id="s1", challenger_submission_id="c1",
-        problem_statement="p", repo_clone_url="u", base_commit="c",
+        task_id="t1",
+        submission_id="s1",
+        challenger_submission_id="c1",
+        problem_statement="p",
+        repo_clone_url="u",
+        base_commit="c",
     )
 
 
 def _config() -> SimpleNamespace:
-    return SimpleNamespace(qualify_min_changed_lines=1, submissions_dir=Path("/nonexistent"))
+    return SimpleNamespace(
+        qualify_min_changed_lines=1, submissions_dir=Path("/nonexistent")
+    )
 
 
-def _result(exit_reason: str, *, success: bool = False, diff: str = "") -> AgentRunResult:
+def _result(
+    exit_reason: str, *, success: bool = False, diff: str = ""
+) -> AgentRunResult:
     return AgentRunResult(
-        success=success, solution_diff=diff, exit_reason=exit_reason,
-        elapsed_seconds=1.0, usage=None,
+        success=success,
+        solution_diff=diff,
+        exit_reason=exit_reason,
+        elapsed_seconds=1.0,
+        usage=None,
         error="boom" if exit_reason != EXIT_COMPLETED else None,
     )
 
@@ -131,10 +145,14 @@ def test_tick_prioritizes_duel_jobs_before_qualification(monkeypatch) -> None:
 
     db = Db()
     monkeypatch.setattr(
-        loop_mod, "_solve_duel", lambda job, **_kw: calls.append(("duel", job.submission_id))
+        loop_mod,
+        "_solve_duel",
+        lambda job, **_kw: calls.append(("duel", job.submission_id)),
     )
     monkeypatch.setattr(
-        loop_mod, "_qualify", lambda job, **_kw: calls.append(("qual", job.submission_id))
+        loop_mod,
+        "_qualify",
+        lambda job, **_kw: calls.append(("qual", job.submission_id)),
     )
 
     ran = loop_mod._tick(
@@ -171,7 +189,6 @@ def test_qualification_terminal_outcome_persists(monkeypatch, result) -> None:
     db, cfg = _FakeDb(), _config()
     _qualify(db, cfg)
     assert len(db.qualifications) == 1  # a solve is recorded (pending/disqualified)
-    assert db.qualifications[0]["exit_reason"] == result.exit_reason
 
 
 def test_qualification_agent_error_disqualifies(monkeypatch) -> None:
@@ -179,25 +196,6 @@ def test_qualification_agent_error_disqualifies(monkeypatch) -> None:
     db, cfg = _FakeDb(), _config()
     _qualify(db, cfg)
     assert db.qualifications[0]["qualified"] is False
-
-
-def test_qualification_viable_solve_forwards_usage_summary(monkeypatch) -> None:
-    usage = SimpleNamespace(to_dict=lambda: {"request_count": 1, "total_tokens": 42})
-    result = AgentRunResult(
-        success=True,
-        solution_diff="+added\n",
-        exit_reason=EXIT_COMPLETED,
-        elapsed_seconds=1.0,
-        usage=usage,
-    )
-    _stub_run(monkeypatch, result)
-    db, cfg = _FakeDb(), _config()
-    _qualify(db, cfg)
-    assert db.qualifications[0]["qualified"] is True
-    assert db.qualifications[0]["usage_summary"] == {
-        "request_count": 1,
-        "total_tokens": 42,
-    }
 
 
 # -- duel --------------------------------------------------------------------
@@ -214,7 +212,9 @@ def test_duel_terminal_outcome_saves_solution(monkeypatch, result) -> None:
     _stub_run(monkeypatch, result)
     db, cfg = _FakeDb(), _config()
     _duel(db, cfg)
-    assert len(db.duel_solutions) == 1  # bad agents (empty/crash) are saved instantly too
+    assert (
+        len(db.duel_solutions) == 1
+    )  # bad agents (empty/crash) are saved instantly too
     assert db.duel_solutions[0]["exit_reason"] == result.exit_reason
     assert db.duel_solutions[0]["challenger_submission_id"] == "c1"
 
@@ -268,8 +268,6 @@ def test_qualification_clone_error_disqualifies_task(monkeypatch) -> None:
             "king_submission_id": "s1",
             "qualified": False,
             "solution": "",
-            "duration": 0.0,
-            "exit_reason": "task_setup_failed",
         }
     ]
     assert fake.exceptions[0]["event_type"] == "qualification_task_setup_failed"
@@ -288,25 +286,37 @@ def _report(monkeypatch, result: AgentRunResult) -> _FakeAxiom:
 
 def _res(reason: str, *, usage=None, error: str | None = None) -> AgentRunResult:
     return AgentRunResult(
-        success=False, solution_diff="", exit_reason=reason,
-        elapsed_seconds=1.0, usage=usage, error=error,
+        success=False,
+        solution_diff="",
+        exit_reason=reason,
+        elapsed_seconds=1.0,
+        usage=usage,
+        error=error,
     )
 
 
 def test_report_failure_llm_timeout_is_info_category(monkeypatch) -> None:
-    fake = _report(monkeypatch, _res(EXIT_UPSTREAM_ERROR, usage=_usage(timeouts=1, last="ReadTimeout: x")))
+    fake = _report(
+        monkeypatch,
+        _res(EXIT_UPSTREAM_ERROR, usage=_usage(timeouts=1, last="ReadTimeout: x")),
+    )
     assert fake.failures[0]["category"] == "llm_timeout"
     assert fake.failures[0]["exception"] == "ReadTimeout: x"
 
 
 def test_report_failure_llm_error_when_not_timeout(monkeypatch) -> None:
-    fake = _report(monkeypatch, _res(EXIT_UPSTREAM_ERROR, usage=_usage(timeouts=0, last="HTTP 402")))
+    fake = _report(
+        monkeypatch,
+        _res(EXIT_UPSTREAM_ERROR, usage=_usage(timeouts=0, last="HTTP 402")),
+    )
     assert fake.failures[0]["category"] == "llm_error"
     assert fake.failures[0]["exception"] == "HTTP 402"
 
 
 def test_report_failure_agent_error_includes_traceback(monkeypatch) -> None:
-    fake = _report(monkeypatch, _res(EXIT_AGENT_ERROR, error="Traceback ... ValueError"))
+    fake = _report(
+        monkeypatch, _res(EXIT_AGENT_ERROR, error="Traceback ... ValueError")
+    )
     assert fake.failures[0]["category"] == "agent_error"
     assert "ValueError" in fake.failures[0]["exception"]
 

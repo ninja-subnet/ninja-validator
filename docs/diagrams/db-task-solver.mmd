@@ -12,7 +12,7 @@ flowchart LR
     ts -. "R  active challenges (status 1/2)" .-> chal
     ts -. "R  which (task, challenger)<br/>have no solution yet" .-> tsol
     ts == "W  UPDATE status_id =<br/>PENDING_SCREEN (3) / DISQUALIFIED (2)" ==> tasks
-    ts == "W  INSERT qualification patch<br/>+ solve telemetry" ==> screen
+    ts == "W  INSERT viable<br/>qualification patch" ==> screen
     ts == "W  INSERT fresh duel solution,<br/>duration, exit_reason" ==> tsol
 
     classDef worker fill:#2563eb,stroke:#1e3a8a,color:#fff;

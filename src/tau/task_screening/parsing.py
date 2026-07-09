@@ -2,20 +2,12 @@
 
 from __future__ import annotations
 
-import json
 import math
-import textwrap
-from dataclasses import dataclass
-from typing import Any
+
+from tau.judging.parsing import extract_json_object
 
 
-@dataclass(frozen=True, slots=True)
-class ParsedScore:
-    score: float
-    rationale: str
-
-
-def parse_score(raw: str) -> ParsedScore:
+def parse_score(raw: str) -> float:
     """Parse ``{score: 0-100, rationale: str}`` and normalize to ``[0, 1]``.
 
     Invalid or out-of-range model output raises ``ValueError``. The caller is a
@@ -23,7 +15,7 @@ def parse_score(raw: str) -> ParsedScore:
     incorrectly admit an unscreened task.
     """
 
-    payload = _extract_json_object(raw)
+    payload = extract_json_object(raw)
     if payload is None:
         raise ValueError("task screener did not return a JSON object")
     if "score" not in payload:
@@ -38,27 +30,4 @@ def parse_score(raw: str) -> ParsedScore:
     rationale = payload.get("rationale")
     if not isinstance(rationale, str) or not rationale.strip():
         raise ValueError("task screener rationale must be a non-empty string")
-    return ParsedScore(score=numeric_score / 100.0, rationale=rationale.strip())
-
-
-def _extract_json_object(raw_output: str) -> dict[str, Any] | None:
-    try:
-        payload = json.loads(raw_output)
-        if isinstance(payload, dict):
-            return payload
-    except (json.JSONDecodeError, TypeError):
-        pass
-
-    fenced = textwrap.dedent(raw_output)
-    for marker in ("```json", "```"):
-        if marker not in fenced:
-            continue
-        for part in fenced.split(marker)[1:]:
-            body = part.split("```", 1)[0].strip()
-            try:
-                payload = json.loads(body)
-            except (json.JSONDecodeError, TypeError):
-                continue
-            if isinstance(payload, dict):
-                return payload
-    return None
+    return numeric_score / 100.0

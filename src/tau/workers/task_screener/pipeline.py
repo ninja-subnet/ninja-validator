@@ -8,9 +8,14 @@ from collections.abc import Sequence
 from dataclasses import dataclass, field
 
 from tau.axiom import get_axiom
-from tau.db.task_screening import TaskScreenRequest, TaskScreeningDb
+from tau.db.task_screening import (
+    FinalScreeningOutcome,
+    TaskScreenRequest,
+    TaskScreeningDb,
+)
+from tau.judging.safety import detect_injection
 from tau.openrouter import LLMClient
-from tau.task_screening import Candidate, ScreeningResult, Task
+from tau.task_screening import Candidate, Task
 
 from .config import TaskScreenerConfig, TaskScreenMode
 from .runner import ScreenRun, screen_with_fallback
@@ -136,47 +141,69 @@ async def _screen_and_save(
     request: TaskScreenRequest,
 ) -> None:
     if config.mode is TaskScreenMode.DISABLED:
-        await _save_disabled(db, config, request)
+        await _save_decision(db, config, request, "qualified", "screening_disabled")
+        return
+    assert config.llm is not None
+
+    if detect_injection(request.qualification_solution) is not None:
+        await _save_decision(
+            db,
+            config,
+            request,
+            "disqualified",
+            "prompt_injection",
+            model="static/prompt-injection",
+        )
         return
 
     run = await screen_with_fallback(
         Task(
-            task_id=request.task_id,
             problem_statement=request.problem_statement,
             reference_patch=request.reference_patch,
         ),
-        Candidate(
-            submission_id=request.king_submission_id,
-            patch=request.qualification_solution,
-        ),
+        Candidate(patch=request.qualification_solution),
         clients=clients,
-        attempts=config.attempts,
-        total_timeout_seconds=config.total_timeout_seconds,
-        per_attempt_timeout_seconds=config.timeout_seconds,
+        attempts=config.llm.attempts,
+        total_timeout_seconds=config.llm.total_timeout_seconds,
+        per_attempt_timeout_seconds=config.llm.timeout_seconds,
     )
 
     if run.result is None:
         await _save_retryable_error(db, config, request, run)
         return
 
-    decision = _decision(
-        run.result,
-        max_score=config.max_king_score,
-        mode=config.mode,
+    score = run.result.score
+    if config.mode is TaskScreenMode.SHADOW:
+        outcome, reason = "qualified", "shadow_score_recorded"
+    elif score > config.max_king_score:
+        outcome, reason = "disqualified", "score_above_max"
+    else:
+        outcome, reason = "qualified", "score_at_or_below_max"
+    await _save_decision(
+        db,
+        config,
+        request,
+        outcome,
+        reason,
+        score=score,
+        model=run.result.model,
+        attempts=run.attempts,
+        duration_seconds=run.duration_seconds,
     )
-    if decision is None:
-        # Defensive fail-closed handling for an impossible/invalid core result.
-        invalid = ScreenRun(
-            result=None,
-            attempts=run.attempts,
-            duration_seconds=run.duration_seconds,
-            error="task screening returned a scored result without a score",
-            error_model=run.result.model,
-        )
-        await _save_retryable_error(db, config, request, invalid)
-        return
 
-    outcome, score, reason, rationale = decision
+
+async def _save_decision(
+    db: TaskScreeningDb,
+    config: TaskScreenerConfig,
+    request: TaskScreenRequest,
+    outcome: FinalScreeningOutcome,
+    reason: str,
+    *,
+    score: float | None = None,
+    model: str | None = None,
+    attempts: int = 0,
+    duration_seconds: float = 0,
+) -> None:
     saved = await db.save_decision(
         task_id=request.task_id,
         king_submission_id=request.king_submission_id,
@@ -184,10 +211,7 @@ async def _screen_and_save(
         king_score=score,
         max_score=config.max_king_score,
         reason=reason,
-        model=run.result.model,
-        rationale=rationale,
-        attempts=run.attempts,
-        duration_seconds=run.duration_seconds,
+        model=model,
     )
     if not saved:
         log.info("discarded stale task screen result for task %s", request.task_id)
@@ -199,8 +223,8 @@ async def _screen_and_save(
         outcome,
         score,
         config.max_king_score,
-        run.attempts,
-        run.duration_seconds,
+        attempts,
+        duration_seconds,
     )
     get_axiom().info(
         source="task-screener",
@@ -211,33 +235,10 @@ async def _screen_and_save(
         reason=reason,
         king_score=score,
         max_score=config.max_king_score,
-        model=run.result.model,
-        attempts=run.attempts,
-        duration_seconds=run.duration_seconds,
-        fingerprint=run.result.fingerprint,
+        model=model,
+        attempts=attempts,
+        duration_seconds=duration_seconds,
     )
-
-
-def _decision(
-    result: ScreeningResult, *, max_score: float, mode: TaskScreenMode
-) -> tuple[str, float | None, str, str] | None:
-    if result.is_blocked:
-        reason = str(result.blocked_reason or "blocked")
-        rationale = result.rationale
-        if result.blocked_evidence:
-            rationale = (
-                f"{rationale}\n{result.blocked_evidence}"
-                if rationale
-                else result.blocked_evidence
-            )
-        return "disqualified", None, reason, rationale
-    if result.score is None:
-        return None
-    if mode is TaskScreenMode.SHADOW:
-        return "qualified", result.score, "shadow_score_recorded", result.rationale
-    if result.score > max_score:
-        return "disqualified", result.score, "score_above_max", result.rationale
-    return "qualified", result.score, "score_at_or_below_max", result.rationale
 
 
 async def _save_retryable_error(
@@ -250,34 +251,28 @@ async def _save_retryable_error(
     result = await db.save_error(
         task_id=request.task_id,
         king_submission_id=request.king_submission_id,
-        max_score=config.max_king_score,
-        model=run.error_model,
-        error=error,
-        attempts=run.attempts,
-        duration_seconds=run.duration_seconds,
         max_failed_runs=config.max_failed_runs,
         retry_base_seconds=config.retry_base_seconds,
         retry_max_seconds=config.retry_max_seconds,
     )
     log.warning(
-        "task screen error for %s (saved=%s, exhausted=%s, failed_runs=%s): %s",
+        "task screen error for %s (state=%s, failed_runs=%s): %s",
         request.task_id,
-        result.saved,
-        result.exhausted,
+        result.state,
         result.failed_runs,
         error,
     )
     get_axiom().warn(
         source="task-screener",
         event_type=(
-            "task_screen_failed" if result.exhausted else "task_screen_retryable_error"
+            "task_screen_failed"
+            if result.state == "exhausted"
+            else "task_screen_retryable_error"
         ),
         task_id=request.task_id,
         king_submission_id=request.king_submission_id,
-        saved=result.saved,
-        exhausted=result.exhausted,
+        state=result.state,
         failed_runs=result.failed_runs,
-        cumulative_attempts=result.cumulative_attempts,
         next_retry_at=(
             result.next_retry_at.isoformat() if result.next_retry_at else None
         ),
@@ -286,42 +281,6 @@ async def _save_retryable_error(
         duration_seconds=run.duration_seconds,
         error=error,
     )
-
-
-async def _save_disabled(
-    db: TaskScreeningDb,
-    config: TaskScreenerConfig,
-    request: TaskScreenRequest,
-) -> None:
-    saved = await db.save_decision(
-        task_id=request.task_id,
-        king_submission_id=request.king_submission_id,
-        outcome="qualified",
-        king_score=None,
-        max_score=config.max_king_score,
-        reason="screening_disabled",
-        model=None,
-        rationale=None,
-        attempts=0,
-        duration_seconds=0.0,
-    )
-    if saved:
-        log.info("task screening disabled; qualified task %s", request.task_id)
-        get_axiom().info(
-            source="task-screener",
-            event_type="task_screen_saved",
-            task_id=request.task_id,
-            king_submission_id=request.king_submission_id,
-            outcome="qualified",
-            reason="screening_disabled",
-            king_score=None,
-            max_score=config.max_king_score,
-            model=None,
-            attempts=0,
-            duration_seconds=0.0,
-        )
-    else:
-        log.info("discarded stale disabled-mode decision for task %s", request.task_id)
 
 
 async def _sleep_until_stop(stop: asyncio.Event, seconds: float) -> None:

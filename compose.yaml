@@ -98,10 +98,10 @@ services:
         condition: service_completed_successfully
     restart: unless-stopped
 
-  # Task-solver worker: qualify CANDIDATE tasks by running the reigning king's
-  # agent in a locked-down sandbox (-> QUALIFIED/DISQUALIFIED), then produce
-  # challenger solutions for active challenges (-> task_solutions, feeding the
-  # judge). It is docker-out-of-docker: it mounts the host Docker socket to spawn
+  # Task-solver worker: run the reigning king on CANDIDATE tasks in a locked-down
+  # sandbox (-> PENDING_SCREEN/DISQUALIFIED), then produce fresh king/challenger
+  # solutions for active challenges (-> duel_task_solutions, feeding the judge).
+  # It is docker-out-of-docker: it mounts the host Docker socket to spawn
   # sibling sandbox containers. The agent reaches the LLM only through an in-proc
   # proxy on a per-solve internal (internet-less) network; the upstream key never
   # enters the sandbox. INSTALL_GIT=true adds git for the host-side task clone.

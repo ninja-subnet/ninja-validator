@@ -64,7 +64,6 @@ BACKLOG_POLL_SECONDS = 1.0
 # way persists nothing and is retried on a later tick. Everything else — including a bad
 # agent that crashes or returns an empty result — is a terminal outcome and is saved.
 _RETRYABLE_EXIT_REASONS = frozenset({EXIT_UPSTREAM_ERROR, EXIT_SANDBOX_ERROR})
-_TASK_SETUP_FAILED = "task_setup_failed"
 
 
 def _agent_dir(config: SolverConfig, submission_id: str) -> Path | None:
@@ -146,7 +145,9 @@ def run(
     while not stop.is_set():
         ran = 0
         try:
-            ran = _tick(db=db, client=client, config=config, image_tag=image_tag, stop=stop)
+            ran = _tick(
+                db=db, client=client, config=config, image_tag=image_tag, stop=stop
+            )
         except Exception:  # noqa: BLE001 — one bad tick must not kill the worker
             log.exception("solver tick failed")
         # A saturated tick means backlog likely remains: re-poll almost
@@ -171,9 +172,7 @@ def _tick(
         pool_targets=config.pool_targets,
     )
     qual_jobs = (
-        db.next_qualification_jobs(cap - len(duel_jobs))
-        if len(duel_jobs) < cap
-        else []
+        db.next_qualification_jobs(cap - len(duel_jobs)) if len(duel_jobs) < cap else []
     )
     work: list[Callable[[], None]] = [
         partial(
@@ -241,8 +240,6 @@ def _qualify(
             king_submission_id=job.submission_id,
             qualified=False,
             solution="",
-            duration=0.0,
-            exit_reason=_TASK_SETUP_FAILED,
         )
         log.warning(
             "qualification task=%s king=%s setup failed; marking DISQUALIFIED (%s)",
@@ -287,9 +284,6 @@ def _qualify(
         king_submission_id=job.submission_id,
         qualified=qualified,
         solution=result.solution_diff,
-        duration=result.elapsed_seconds,
-        exit_reason=result.exit_reason,
-        usage_summary=result.usage.to_dict() if result.usage is not None else None,
     )
     log.info(
         "qualification task=%s king=%s -> %s (exit=%s, %d changed lines)",

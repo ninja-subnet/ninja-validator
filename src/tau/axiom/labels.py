@@ -22,7 +22,6 @@ EventType: TypeAlias = Literal[
     "challenge_closed",
     "judgment_saved",
     "judgment_degraded",
-    "task_screen_duel_comparison",
     "task_inserted",
     "task_screen_saved",
     "submission_qualification",

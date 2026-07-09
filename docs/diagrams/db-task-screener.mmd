@@ -7,9 +7,9 @@ flowchart LR
 
     sc -. "R  reigning king" .-> kings
     sc -. "R  due PENDING_SCREEN tasks" .-> tasks
-    sc -. "R  qualification patch +<br/>attempt/failure/backoff state" .-> screen
+    sc -. "R  qualification patch +<br/>failure/backoff state" .-> screen
     sc == "W  guarded status update:<br/>QUALIFIED / DISQUALIFIED" ==> tasks
-    sc == "W  score, ceiling, outcome,<br/>reason, model, rationale,<br/>attempt/error telemetry" ==> screen
+    sc == "W  score, ceiling, reason,<br/>model, failed_runs, next_retry_at" ==> screen
 
     classDef worker fill:#2563eb,stroke:#1e3a8a,color:#fff;
     classDef store fill:#f59e0b,stroke:#b45309,color:#111;

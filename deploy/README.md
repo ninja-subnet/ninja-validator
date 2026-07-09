@@ -49,8 +49,8 @@ Notable modeling choices:
   submission_id)`, so the king is solved fresh for each challenge rather than reused
   from a task-wide cache.
 - `tasks` hangs off a king via `king_id`, carrying a `pool_type` discriminator.
-- `task_screenings` stores the king's qualification patch, independent
-  single-candidate difficulty verdict, and bounded retry/backoff state before a
+- `task_screenings` stores the king's viable qualification patch, difficulty
+  decision, and bounded retry/backoff state before a
   task becomes duel-eligible. Screening starts in non-enforcing `shadow` mode; an
   operator explicitly selects `enforce` after calibration.
 - `registrations` had no key in the ERD, so it gets a surrogate `id` plus a

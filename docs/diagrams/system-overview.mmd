@@ -30,7 +30,6 @@ flowchart LR
     qualified -->|"fresh king &amp;<br/>challenger solves"| ts
     ts --> solutions
     solutions --> jd
-    screening -.->|"qualification score + patch<br/>(hashed before drift telemetry)"| jd
     jd -->|"blinded pairwise<br/>LLM comparison"| judg
     judg --> dr
     dr -->|"tally per pool;<br/>crown / defend"| reign

@@ -38,7 +38,7 @@ def parse_verdict(raw: str) -> RawVerdict:
     Raises ValueError if no JSON object can be recovered, so the orchestrator can
     fall back to a neutral judgment.
     """
-    payload = _extract_json_object(raw)
+    payload = extract_json_object(raw)
     if payload is None:
         raise ValueError("judge did not return a JSON object")
 
@@ -92,7 +92,7 @@ def _clamp01(value: float) -> float:
     return max(0.0, min(1.0, float(value)))
 
 
-def _extract_json_object(raw_output: str) -> dict[str, Any] | None:
+def extract_json_object(raw_output: str) -> dict[str, Any] | None:
     """Recover a JSON object from raw text, including ```json fenced blocks."""
     try:
         payload = json.loads(raw_output)

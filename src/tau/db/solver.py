@@ -131,26 +131,20 @@ class SolverDb:
         king_submission_id: str,
         qualified: bool,
         solution: str,
-        duration: float,
-        exit_reason: str,
-        usage_summary: Mapping[str, Any] | None = None,
     ) -> None:
         """Record the king solve and advance a CANDIDATE atomically.
 
         ``qualified`` means the basic solve-viability check passed; it does *not* make
         the task duel-ready. A viable solve moves to ``PENDING_SCREEN`` for the
-        single-task difficulty scorer, while a terminal non-viable solve is audited
-        and immediately ``DISQUALIFIED``. Duel comparison solutions are still written
-        later so the king is re-run under the same conditions as the challenger.
+        single-task difficulty scorer, while a terminal non-viable solve is immediately
+        ``DISQUALIFIED``. Duel comparison solutions are still written later so the king
+        is re-run under the same conditions as the challenger.
 
         The guarded status update wins the row lock before the screening insert. This
         makes concurrent/stale completions harmless and ensures the task state and its
-        audit row commit together.
+        screening row commit together.
         """
-        status = (
-            TaskStatus.PENDING_SCREEN if qualified else TaskStatus.DISQUALIFIED
-        )
-        outcome = "pending" if qualified else "disqualified"
+        status = TaskStatus.PENDING_SCREEN if qualified else TaskStatus.DISQUALIFIED
         with session_scope(self._sessions) as session:
             reigning_king_id = (
                 select(models.King.king_id)
@@ -175,18 +169,14 @@ class SolverDb:
                     king_submission_id,
                 )
                 return
-            session.execute(
-                insert(models.TaskScreening).values(
-                    task_id=task_id,
-                    king_submission_id=king_submission_id,
-                    qualification_solution=solution,
-                    qualification_duration_seconds=duration,
-                    qualification_exit_reason=exit_reason,
-                    qualification_usage_summary=_sanitize_usage_summary(usage_summary),
-                    outcome=outcome,
-                    reason=None if qualified else "king_failed",
+            if qualified:
+                session.execute(
+                    insert(models.TaskScreening).values(
+                        task_id=task_id,
+                        king_submission_id=king_submission_id,
+                        qualification_solution=solution,
+                    )
                 )
-            )
 
     # -- phase B: fresh duel solves ------------------------------------------
     def next_duel_jobs(

@@ -139,20 +139,12 @@ def test_task_screening_table_shape_and_foreign_keys() -> None:
         "task_id",
         "king_submission_id",
         "qualification_solution",
-        "qualification_duration_seconds",
-        "qualification_exit_reason",
-        "qualification_usage_summary",
         "king_score",
         "max_score",
-        "outcome",
         "reason",
         "model",
-        "rationale",
-        "error",
-        "attempts",
         "failed_runs",
         "next_retry_at",
-        "score_duration_seconds",
         "created_at",
         "updated_at",
     } == set(cols.keys())
@@ -160,10 +152,6 @@ def test_task_screening_table_shape_and_foreign_keys() -> None:
         "task_id",
         "king_submission_id",
         "qualification_solution",
-        "qualification_duration_seconds",
-        "qualification_exit_reason",
-        "outcome",
-        "attempts",
         "failed_runs",
         "created_at",
         "updated_at",
@@ -181,7 +169,7 @@ def test_task_screening_table_shape_and_foreign_keys() -> None:
     ) in fk_targets
 
 
-def test_task_screening_checks_bound_scores_and_outcomes() -> None:
+def test_task_screening_checks_bound_scores_and_failures() -> None:
     checks = {
         c.name: str(c.sqltext)
         for c in TaskScreening.__table__.constraints
@@ -189,22 +177,8 @@ def test_task_screening_checks_bound_scores_and_outcomes() -> None:
     }
     assert "ck_task_screenings_king_score" in checks
     assert "ck_task_screenings_max_score" in checks
-    assert "ck_task_screenings_outcome" in checks
-    assert "ck_task_screenings_attempts" in checks
     assert "ck_task_screenings_failed_runs" in checks
-    for outcome in ("pending", "qualified", "disqualified"):
-        assert outcome in checks["ck_task_screenings_outcome"]
-    assert "attempts >= 0" in checks["ck_task_screenings_attempts"]
     assert "failed_runs >= 0" in checks["ck_task_screenings_failed_runs"]
-
-
-def test_task_screening_has_pending_retry_index() -> None:
-    index = next(
-        index
-        for index in TaskScreening.__table__.indexes
-        if index.name == "ix_task_screenings_pending_retry"
-    )
-    assert [column.name for column in index.columns] == ["outcome", "next_retry_at"]
 
 
 def test_challenge_status_values_are_stable() -> None:

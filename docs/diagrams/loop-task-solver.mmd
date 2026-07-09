@@ -3,9 +3,9 @@ flowchart TB
     start(["task-solver.main()"]) --> gather["Gather jobs up to MAX_CONTAINERS (4)"]
     gather --> cjobs["1. Duel jobs:<br/>QUALIFIED tasks in active challenges<br/>with either side missing"]
     cjobs --> qjobs["2. Qualification jobs (fill remainder):<br/>CANDIDATE tasks for reigning king"]
-    cjobs --> pool["Run jobs concurrently<br/>(ThreadPoolExecutor, one sandbox each)"]
+    qjobs --> pool["Run jobs concurrently<br/>(ThreadPoolExecutor, one sandbox each)"]
 
-    pool --> run["Per job: assemble work tree,<br/>run agent in hardened sandbox<br/>(king's agent to qualify /<br/>challenger's agent to solve)"]
+    pool --> run["Per job: assemble work tree,<br/>run agent in hardened sandbox<br/>(king for qualification /<br/>either side for a duel)"]
     run --> infra{"retryable infra fault?<br/>(EXIT_UPSTREAM_ERROR /<br/>EXIT_SANDBOX_ERROR)"}
     infra -- yes --> leave["Persist nothing;<br/>leave task for retry"]
     infra -- no --> kind{"qualification<br/>or duel?"}

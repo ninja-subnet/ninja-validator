@@ -47,9 +47,8 @@ miner against a fixed benchmark, the validator runs a **continuous tournament**:
    at a parent commit plus a natural-language problem statement (the commit is
    the hidden reference solution).
 3. Each task is only used once the **king's own agent produces a viable patch**
-   and a single-candidate scorer confirms the patch is not above the configured
-   difficulty ceiling. This filters out unusable tasks and tasks that are too easy
-   for the reigning king.
+   and it passes through single-candidate screening. The default shadow mode
+   records the score; enforce mode also filters tasks above the configured ceiling.
 4. A **challenger** (another eligible submission) is matched against the king.
    Both agents solve the same qualified tasks in isolated sandboxes.
 5. An LLM **judge** compares the two patches head-to-head, blinded to which is
@@ -148,7 +147,7 @@ they read and write.
 | **task-generator** | Mine GitHub commits → LLM task descriptions | `kings`, `tasks` (counts) | `tasks` (CANDIDATE), `task_generation_failures` | 30s |
 | **task-solver** | Run king/challenger agents in sandboxes | `kings`, `tasks`, `challenges`, `duel_task_solutions` | `tasks` (PENDING_SCREEN/DISQUALIFIED), `task_screenings`, `duel_task_solutions` | 30s idle, ~1s on backlog |
 | **task-screener** | Score one king qualification patch per task; shadow or enforce the difficulty ceiling | `kings`, `tasks`, `task_screenings` | `tasks` (QUALIFIED/DISQUALIFIED), `task_screenings` | 10s |
-| **judge** | Blinded pairwise LLM comparison plus qualification-vs-duel drift telemetry | `tasks`, `kings`, `challenges`, `duel_task_solutions`, `task_screenings`, `judgements` | `judgements` | 10s |
+| **judge** | Blinded pairwise LLM comparison | `tasks`, `kings`, `challenges`, `duel_task_solutions`, `judgements` | `judgements` | 10s |
 | **duel-resolver** | Resolve duels, crown kings (**singleton**) | `kings`, `submissions`, `registrations`, `tasks`, `judgements`, `challenges` | `challenges`, `duel_resolutions`, `kings` | 5s |
 
 > **Submission ingestion is a seam.** The chain-watcher currently syncs
@@ -266,12 +265,12 @@ concurrent sandboxes. After an idle or partial tick the worker waits
 
 - **Sets statuses:** `tasks.status_id` → `PENDING_SCREEN (3)` or
   `DISQUALIFIED (2)` during qualification.
-- **Writes:** `task_screenings` with the qualification patch and solve telemetry;
+- **Writes:** `task_screenings` with the viable qualification patch;
   `duel_task_solutions` with fresh duel patches (`solution`, `duration`, `exit_reason`),
   idempotent on `(task_id, challenger_submission_id, submission_id)`.
-- **Rollout retention:** the database keeps the final patch, duration, exit reason,
-  and a sanitized aggregate usage summary. It does not retain the agent's full
-  model conversation or step-by-step rollout transcript.
+- **Rollout retention:** qualification stores only the final patch. Duel solves
+  additionally keep duration, exit reason, and sanitized aggregate usage—not the
+  full model conversation or step-by-step rollout.
 - **Infra vs. miner faults:** an upstream/LLM outage or a sandbox/Docker failure
   (`EXIT_UPSTREAM_ERROR` / `EXIT_SANDBOX_ERROR`) is **retryable** — nothing is
   persisted and the task is picked up next tick. Everything else (agent crash,
@@ -324,12 +323,6 @@ being sent to the model.
 
 - **Writes:** `judgements` (`llm_winner`, `king_score`, `challenger_score`,
   plus telemetry), `ON CONFLICT DO NOTHING` (first verdict wins).
-- **Sandbagging telemetry:** after each newly saved, non-degraded duel verdict,
-  the worker compares the king's fresh duel score and patch with its earlier
-  qualification screening data. It emits the explicit duel-minus-screen score
-  delta, both scoring model identifiers, SHA-256 fingerprints, and patch
-  equality—never patch bodies. Fabricated neutral fallback verdicts are excluded.
-  This is monitoring only: a single sample does not penalize or disqualify a king.
 - **The `error` column is meaningful:** if all model attempts fail or time out,
   the judge writes a **neutral error verdict** (`0.5 / 0.5`, winner `tie`) with
   `error` set — that is *not* a tie the model actually decided.
@@ -638,17 +631,8 @@ authoritative, commented list). Grouped by concern:
 |-----|---------|--------|
 | `TAU_TASK_SCREEN_MODE` | `shadow` | `shadow` records scores but admits tasks; `enforce` applies the ceiling; `disabled` admits without an LLM/key. |
 | `TAU_TASK_SCREEN_MAX_KING_SCORE` | `0.70` | In enforce mode, disqualify when the normalized king score is strictly greater than this ceiling. |
-| `TAU_TASK_SCREEN_MODEL` | `z-ai/glm-5.2` | Primary single-candidate scoring model. |
-| `TAU_TASK_SCREEN_PROVIDER_ONLY` | `z-ai/fp8` | Provider allowlist for the primary scoring route. |
-| `TAU_TASK_SCREEN_PROVIDER_ALLOW_FALLBACKS` | `false` | Disable OpenRouter provider fallback on the primary route. |
-| `TAU_TASK_SCREEN_FALLBACK_MODELS` | `z-ai/glm-5.2` | Comma-separated models tried after the primary route. |
-| `TAU_TASK_SCREEN_FALLBACK_PROVIDER_ONLY` | `atlas-cloud/fp8` | Provider allowlist for fallback scoring routes. |
-| `TAU_TASK_SCREEN_FALLBACK_PROVIDER_ALLOW_FALLBACKS` | `false` | Disable OpenRouter provider fallback on fallback routes. |
-| `TAU_TASK_SCREEN_MAX_TOKENS` | `32000` | Output cap for one scoring call; matches the production duel judge. |
+| `TAU_JUDGE_*` | see below | Screening shares the production duel judge's model, providers, reasoning, attempts, timeouts, and token cap. |
 | `TAU_TASK_SCREEN_CONCURRENCY` | `5` | Task scores in flight. |
-| `TAU_TASK_SCREEN_ATTEMPTS` | `4` | Attempt rounds, interleaving the primary and fallback routes each round. |
-| `TAU_TASK_SCREEN_LLM_TIMEOUT` | `120` | Per-route-call timeout (s); matches the production duel judge. |
-| `TAU_TASK_SCREEN_TOTAL_TIMEOUT` | `300` | Total cap for one screening run (s); matches the production duel judge. |
 | `TAU_TASK_SCREEN_POLL_SECONDS` | `10` | Idle poll interval. |
 | `TAU_TASK_SCREEN_MAX_FAILED_RUNS` | `3` | Failed runs before terminal `screening_exhausted` disqualification and pool refill. |
 | `TAU_TASK_SCREEN_RETRY_BASE_SECONDS` | `60` | Initial exponential-backoff delay after a failed run (s). |

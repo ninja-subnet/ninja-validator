@@ -25,7 +25,7 @@ class RetryError(RuntimeError): ...
 @dataclass(frozen=True, slots=True)
 class ScreenRun:
     result: ScreeningResult | None
-    attempts: int  # LLM calls started; a pre-LLM safety block records zero
+    attempts: int
     duration_seconds: float
     error: str | None = None
     error_model: str | None = None
@@ -41,11 +41,6 @@ class _AttemptCounter:
     def tick(self, model: str) -> None:
         self.value += 1
         self.last_model = model
-
-    def retract_static_block(self) -> None:
-        """A pre-LLM safety block is a screen result, but not an LLM attempt."""
-        self.value -= 1
-        self.last_model = None
 
 
 async def screen_with_fallback(
@@ -117,8 +112,6 @@ async def screen_with_retries(
                         call, timeout=per_attempt_timeout_seconds
                     )
                 )
-                if result.is_blocked and counter is not None:
-                    counter.retract_static_block()
                 return result
             except TimeoutError:
                 if per_attempt_timeout_seconds is None:

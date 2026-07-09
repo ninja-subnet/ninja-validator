@@ -7,7 +7,6 @@ from collections.abc import Sequence
 
 import sqlalchemy as sa
 from alembic import op
-from sqlalchemy.dialects import postgresql
 
 revision: str = "0005_task_screenings"
 down_revision: str | None = "0004_agent_sha256_prefix"
@@ -26,26 +25,10 @@ def upgrade() -> None:
         sa.Column("task_id", sa.Text(), nullable=False),
         sa.Column("king_submission_id", sa.Text(), nullable=False),
         sa.Column("qualification_solution", sa.Text(), nullable=False),
-        sa.Column("qualification_duration_seconds", sa.Float(), nullable=False),
-        sa.Column("qualification_exit_reason", sa.Text(), nullable=False),
-        sa.Column(
-            "qualification_usage_summary",
-            postgresql.JSONB(astext_type=sa.Text()),
-            nullable=True,
-        ),
         sa.Column("king_score", sa.Float(), nullable=True),
         sa.Column("max_score", sa.Float(), nullable=True),
-        sa.Column("outcome", sa.Text(), nullable=False),
         sa.Column("reason", sa.Text(), nullable=True),
         sa.Column("model", sa.Text(), nullable=True),
-        sa.Column("rationale", sa.Text(), nullable=True),
-        sa.Column("error", sa.Text(), nullable=True),
-        sa.Column(
-            "attempts",
-            sa.SmallInteger(),
-            server_default=sa.text("0"),
-            nullable=False,
-        ),
         sa.Column(
             "failed_runs",
             sa.SmallInteger(),
@@ -53,7 +36,6 @@ def upgrade() -> None:
             nullable=False,
         ),
         sa.Column("next_retry_at", sa.DateTime(timezone=True), nullable=True),
-        sa.Column("score_duration_seconds", sa.Float(), nullable=True),
         sa.Column(
             "created_at",
             sa.DateTime(timezone=True),
@@ -74,10 +56,6 @@ def upgrade() -> None:
         ),
         sa.PrimaryKeyConstraint("task_id"),
         sa.CheckConstraint(
-            "qualification_duration_seconds >= 0",
-            name="ck_task_screenings_qualification_duration",
-        ),
-        sa.CheckConstraint(
             "king_score IS NULL OR (king_score >= 0 AND king_score <= 1)",
             name="ck_task_screenings_king_score",
         ),
@@ -86,20 +64,8 @@ def upgrade() -> None:
             name="ck_task_screenings_max_score",
         ),
         sa.CheckConstraint(
-            "outcome IN ('pending', 'qualified', 'disqualified')",
-            name="ck_task_screenings_outcome",
-        ),
-        sa.CheckConstraint(
-            "attempts >= 0",
-            name="ck_task_screenings_attempts",
-        ),
-        sa.CheckConstraint(
             "failed_runs >= 0",
             name="ck_task_screenings_failed_runs",
-        ),
-        sa.CheckConstraint(
-            "score_duration_seconds IS NULL OR score_duration_seconds >= 0",
-            name="ck_task_screenings_score_duration",
         ),
     )
     op.create_index(
@@ -107,15 +73,9 @@ def upgrade() -> None:
         "task_screenings",
         ["king_submission_id"],
     )
-    op.create_index(
-        "ix_task_screenings_pending_retry",
-        "task_screenings",
-        ["outcome", "next_retry_at"],
-    )
 
 
 def downgrade() -> None:
-    op.drop_index("ix_task_screenings_pending_retry", table_name="task_screenings")
     op.drop_index("ix_task_screenings_king_submission_id", table_name="task_screenings")
     op.drop_table("task_screenings")
 

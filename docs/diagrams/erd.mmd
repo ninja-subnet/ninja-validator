@@ -59,15 +59,10 @@ erDiagram
         text task_id PK "FK tasks"
         text king_submission_id FK
         text qualification_solution
-        jsonb qualification_usage_summary
         float king_score "normalized 0..1"
         float max_score "decision ceiling"
-        text outcome "pending/qualified/disqualified"
         text reason
         text model
-        text rationale
-        text error
-        int attempts "cumulative LLM calls"
         int failed_runs
         timestamptz next_retry_at
     }

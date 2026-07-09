@@ -10,7 +10,7 @@ flowchart TB
     injection -- no --> score["Single-candidate LLM score<br/>task + qualification patch<br/>0–100 normalized to 0–1"]
     score --> error{"all routes failed or<br/>response invalid?"}
     error -- yes --> exhausted{"failed_runs reached<br/>configured maximum?"}
-    exhausted -- no --> retry["Record cumulative attempt telemetry;<br/>set exponential-backoff next_retry_at"]
+    exhausted -- no --> retry["Increment failed_runs;<br/>set exponential-backoff next_retry_at"]
     exhausted -- yes --> drop["DISQUALIFIED<br/>reason = screening_exhausted<br/>generator refills slot"]
     error -- no --> shadow{"mode = shadow?"}
     shadow -- yes --> shadowed["Record score + QUALIFIED<br/>reason = shadow_score_recorded"]

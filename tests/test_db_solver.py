@@ -14,7 +14,6 @@ from pathlib import Path
 import pytest
 from dotenv import load_dotenv
 from sqlalchemy import make_url, select, text
-from sqlalchemy.exc import IntegrityError
 
 from tau.db import SolverDb, TaskStatus
 from tau.db.engine import create_db_engine, session_factory, session_scope
@@ -71,7 +70,8 @@ def _ensure_test_database() -> None:
         with engine.connect() as conn:
             conn = conn.execution_options(isolation_level="AUTOCOMMIT")
             already = conn.execute(
-                text("SELECT 1 FROM pg_database WHERE datname = :name"), {"name": db_name}
+                text("SELECT 1 FROM pg_database WHERE datname = :name"),
+                {"name": db_name},
             ).scalar()
             if not already:
                 conn.execute(text(f'CREATE DATABASE "{db_name}"'))
@@ -118,7 +118,9 @@ def _king(session, king_id: str):  # noqa: ANN001
     session.add(King(king_id=king_id))
 
 
-def _task(session, task_id: str, king_id: str, *, pool_type: int, status_id: int, fp: str):  # noqa: ANN001
+def _task(
+    session, task_id: str, king_id: str, *, pool_type: int, status_id: int, fp: str
+):  # noqa: ANN001
     session.add(
         Task(
             task_id=task_id,
@@ -142,9 +144,30 @@ def test_qualification_jobs_returns_candidates_of_current_king(db: SolverDb) -> 
     def seed(s):  # noqa: ANN001
         _submission(s, "king-1")
         _king(s, "king-1")
-        _task(s, "t-pool2", "king-1", pool_type=2, status_id=int(TaskStatus.CANDIDATE), fp="f2")
-        _task(s, "t-pool1", "king-1", pool_type=1, status_id=int(TaskStatus.CANDIDATE), fp="f1")
-        _task(s, "t-done", "king-1", pool_type=1, status_id=int(TaskStatus.QUALIFIED), fp="f3")
+        _task(
+            s,
+            "t-pool2",
+            "king-1",
+            pool_type=2,
+            status_id=int(TaskStatus.CANDIDATE),
+            fp="f2",
+        )
+        _task(
+            s,
+            "t-pool1",
+            "king-1",
+            pool_type=1,
+            status_id=int(TaskStatus.CANDIDATE),
+            fp="f1",
+        )
+        _task(
+            s,
+            "t-done",
+            "king-1",
+            pool_type=1,
+            status_id=int(TaskStatus.QUALIFIED),
+            fp="f3",
+        )
 
     _seed(db, seed)
     jobs = db.next_qualification_jobs(10)
@@ -161,7 +184,14 @@ def test_qualification_jobs_respects_limit(db: SolverDb) -> None:
         _submission(s, "king-1")
         _king(s, "king-1")
         for i in range(3):
-            _task(s, f"t{i}", "king-1", pool_type=1, status_id=int(TaskStatus.CANDIDATE), fp=f"f{i}")
+            _task(
+                s,
+                f"t{i}",
+                "king-1",
+                pool_type=1,
+                status_id=int(TaskStatus.CANDIDATE),
+                fp=f"f{i}",
+            )
 
     _seed(db, seed)
     assert len(db.next_qualification_jobs(2)) == 2
@@ -173,13 +203,16 @@ def test_finish_qualification_viable_moves_to_pending_and_records_solve(
     def seed(s):  # noqa: ANN001
         _submission(s, "king-1")
         _king(s, "king-1")
-        _task(s, "t1", "king-1", pool_type=1, status_id=int(TaskStatus.CANDIDATE), fp="f1")
+        _task(
+            s, "t1", "king-1", pool_type=1, status_id=int(TaskStatus.CANDIDATE), fp="f1"
+        )
 
     _seed(db, seed)
     db.finish_qualification(
-        task_id="t1", king_submission_id="king-1", qualified=True,
-        solution="diff --git a/x b/x", duration=1.2, exit_reason="completed",
-        usage_summary={"request_count": 2, "api_key": "must-not-persist"},
+        task_id="t1",
+        king_submission_id="king-1",
+        qualified=True,
+        solution="diff --git a/x b/x",
     )
     with session_scope(session_factory(db._engine)) as session:  # noqa: SLF001
         task = session.get(Task, "t1")
@@ -187,33 +220,30 @@ def test_finish_qualification_viable_moves_to_pending_and_records_solve(
         assert task.status_id == int(TaskStatus.PENDING_SCREEN)
         assert screening.king_submission_id == "king-1"
         assert screening.qualification_solution == "diff --git a/x b/x"
-        assert screening.qualification_duration_seconds == pytest.approx(1.2)
-        assert screening.qualification_exit_reason == "completed"
-        assert screening.qualification_usage_summary == {"request_count": 2}
-        assert screening.outcome == "pending"
         assert screening.reason is None
         assert screening.king_score is None
 
 
-def test_finish_qualification_non_viable_disqualifies_with_audit(db: SolverDb) -> None:
+def test_finish_qualification_non_viable_disqualifies_without_screening(
+    db: SolverDb,
+) -> None:
     def seed(s):  # noqa: ANN001
         _submission(s, "king-1")
         _king(s, "king-1")
-        _task(s, "t1", "king-1", pool_type=1, status_id=int(TaskStatus.CANDIDATE), fp="f1")
+        _task(
+            s, "t1", "king-1", pool_type=1, status_id=int(TaskStatus.CANDIDATE), fp="f1"
+        )
 
     _seed(db, seed)
     db.finish_qualification(
-        task_id="t1", king_submission_id="king-1", qualified=False,
-        solution="", duration=0.5, exit_reason="time_limit_exceeded",
+        task_id="t1",
+        king_submission_id="king-1",
+        qualified=False,
+        solution="",
     )
     with session_scope(session_factory(db._engine)) as session:  # noqa: SLF001
         assert session.get(Task, "t1").status_id == int(TaskStatus.DISQUALIFIED)
-        screening = session.get(TaskScreening, "t1")
-        assert screening.qualification_solution == ""
-        assert screening.qualification_duration_seconds == pytest.approx(0.5)
-        assert screening.qualification_exit_reason == "time_limit_exceeded"
-        assert screening.outcome == "disqualified"
-        assert screening.reason == "king_failed"
+        assert session.get(TaskScreening, "t1") is None
 
 
 def test_finish_qualification_ignores_stale_non_candidate_completion(
@@ -237,41 +267,9 @@ def test_finish_qualification_ignores_stale_non_candidate_completion(
         king_submission_id="king-1",
         qualified=True,
         solution="late patch",
-        duration=1.2,
-        exit_reason="completed",
     )
     with session_scope(session_factory(db._engine)) as session:  # noqa: SLF001
         assert session.get(Task, "t1").status_id == int(TaskStatus.DISQUALIFIED)
-        assert session.get(TaskScreening, "t1") is None
-
-
-def test_finish_qualification_rolls_back_status_if_audit_insert_fails(
-    db: SolverDb,
-) -> None:
-    def seed(s):  # noqa: ANN001
-        _submission(s, "king-1")
-        _king(s, "king-1")
-        _task(
-            s,
-            "t1",
-            "king-1",
-            pool_type=1,
-            status_id=int(TaskStatus.CANDIDATE),
-            fp="f1",
-        )
-
-    _seed(db, seed)
-    with pytest.raises(IntegrityError):
-        db.finish_qualification(
-            task_id="t1",
-            king_submission_id="king-1",
-            qualified=True,
-            solution="patch",
-            duration=-1.0,
-            exit_reason="completed",
-        )
-    with session_scope(session_factory(db._engine)) as session:  # noqa: SLF001
-        assert session.get(Task, "t1").status_id == int(TaskStatus.CANDIDATE)
         assert session.get(TaskScreening, "t1") is None
 
 
@@ -292,10 +290,26 @@ def _seed_active_challenge(db: SolverDb) -> None:
             )
         )
         # QUALIFIED, pool_type matches the active challenge's status (1).
-        _task(s, "t1", "king-1", pool_type=1, status_id=int(TaskStatus.QUALIFIED), fp="f1")
+        _task(
+            s, "t1", "king-1", pool_type=1, status_id=int(TaskStatus.QUALIFIED), fp="f1"
+        )
         # Wrong pool_type / not qualified -> must be excluded.
-        _task(s, "t-wrongpool", "king-1", pool_type=2, status_id=int(TaskStatus.QUALIFIED), fp="f2")
-        _task(s, "t-candidate", "king-1", pool_type=1, status_id=int(TaskStatus.CANDIDATE), fp="f3")
+        _task(
+            s,
+            "t-wrongpool",
+            "king-1",
+            pool_type=2,
+            status_id=int(TaskStatus.QUALIFIED),
+            fp="f2",
+        )
+        _task(
+            s,
+            "t-candidate",
+            "king-1",
+            pool_type=1,
+            status_id=int(TaskStatus.CANDIDATE),
+            fp="f3",
+        )
         _task(
             s,
             "t-pending-screen",
@@ -343,19 +357,16 @@ def test_duel_jobs_can_wait_for_full_qualified_pool(db: SolverDb) -> None:
     _seed_active_challenge(db)
     targets = PoolTargets(pool_one=2, pool_two=2)
 
-    assert (
-        db.next_duel_jobs(10, require_full_pool=True, pool_targets=targets)
-        == []
-    )
+    assert db.next_duel_jobs(10, require_full_pool=True, pool_targets=targets) == []
 
     def add_second_qualified(s):  # noqa: ANN001
-        _task(s, "t2", "king-1", pool_type=1, status_id=int(TaskStatus.QUALIFIED), fp="f4")
+        _task(
+            s, "t2", "king-1", pool_type=1, status_id=int(TaskStatus.QUALIFIED), fp="f4"
+        )
 
     _seed(db, add_second_qualified)
     jobs = db.next_duel_jobs(10, require_full_pool=True, pool_targets=targets)
-    assert [
-        (j.task_id, j.submission_id, j.challenger_submission_id) for j in jobs
-    ] == [
+    assert [(j.task_id, j.submission_id, j.challenger_submission_id) for j in jobs] == [
         *_expected_duel_pair("t1"),
         *_expected_duel_pair("t2"),
     ]
@@ -365,7 +376,9 @@ def test_duel_jobs_preserves_complete_pairs_when_capacity_is_odd(db: SolverDb) -
     _seed_active_challenge(db)
 
     def add_second_qualified(s):  # noqa: ANN001
-        _task(s, "t2", "king-1", pool_type=1, status_id=int(TaskStatus.QUALIFIED), fp="f4")
+        _task(
+            s, "t2", "king-1", pool_type=1, status_id=int(TaskStatus.QUALIFIED), fp="f4"
+        )
 
     _seed(db, add_second_qualified)
 
@@ -379,16 +392,22 @@ def test_duel_jobs_preserves_complete_pairs_when_capacity_is_odd(db: SolverDb) -
 def test_duel_jobs_excludes_each_already_solved_side(db: SolverDb) -> None:
     _seed_active_challenge(db)
     db.save_duel_task_solution(
-        task_id="t1", challenger_submission_id="sub-chal", submission_id="king-1",
-        solution="king diff", duration=1.0,
+        task_id="t1",
+        challenger_submission_id="sub-chal",
+        submission_id="king-1",
+        solution="king diff",
+        duration=1.0,
         exit_reason="completed",
     )
     jobs = db.next_duel_jobs(10)
     assert [(j.task_id, j.submission_id) for j in jobs] == [("t1", "sub-chal")]
 
     db.save_duel_task_solution(
-        task_id="t1", challenger_submission_id="sub-chal", submission_id="sub-chal",
-        solution="challenger diff", duration=1.0,
+        task_id="t1",
+        challenger_submission_id="sub-chal",
+        submission_id="sub-chal",
+        solution="challenger diff",
+        duration=1.0,
         exit_reason="completed",
     )
     assert db.next_duel_jobs(10) == []
@@ -398,8 +417,11 @@ def test_save_duel_task_solution_is_idempotent(db: SolverDb) -> None:
     _seed_active_challenge(db)
     for _ in range(2):
         db.save_duel_task_solution(
-            task_id="t1", challenger_submission_id="sub-chal",
-            submission_id="sub-chal", solution="diff", duration=1.0,
+            task_id="t1",
+            challenger_submission_id="sub-chal",
+            submission_id="sub-chal",
+            solution="diff",
+            duration=1.0,
             exit_reason="completed",
         )
     with session_scope(session_factory(db._engine)) as session:  # noqa: SLF001
