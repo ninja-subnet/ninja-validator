@@ -1559,7 +1559,7 @@ requires-dist = [
     { name = "psycopg", extras = ["binary"], specifier = "==3.2.9" },
     { name = "sqlalchemy", extras = ["asyncio"], specifier = "==2.0.41" },
 ]
-provides-extras = ["migrate", "bittensor", "judge", "task-generator", "duel-resolver", "qualification", "weight-setter", "task-solver"]
+provides-extras = ["migrate", "bittensor", "judge", "task-screener", "task-generator", "duel-resolver", "qualification", "weight-setter", "task-solver"]
 
 [package.metadata.requires-dev]
 dev = [

@@ -23,6 +23,7 @@ EventType: TypeAlias = Literal[
     "judgment_saved",
     "judgment_degraded",
     "task_inserted",
+    "task_screen_saved",
     "submission_qualification",
     # errors
     "challenger_infra_error",
@@ -34,6 +35,8 @@ EventType: TypeAlias = Literal[
     "generation_failed",
     "fetch_failed",
     "submission_qualification_error",
+    "task_screen_failed",
+    "task_screen_retryable_error",
 ]
 
 
@@ -43,6 +46,7 @@ Source: TypeAlias = Literal[
     "weight-setter",
     "duel-resolver",
     "task-generator",
+    "task-screener",
     "judge",
 ]
 

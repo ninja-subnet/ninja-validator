@@ -228,6 +228,21 @@ async def test_pending_pool_deficits_ignores_disqualified(db: GeneratorDb) -> No
     ]
 
 
+async def test_pending_pool_deficits_counts_pending_screen_as_in_flight(
+    db: GeneratorDb,
+) -> None:
+    targets = PoolTargets(pool_one=1, pool_two=1)
+    await _insert(db, fingerprint="fp-screening", pool=PoolType.POOL_ONE)
+    async with async_session_scope(db._sessions) as session:  # noqa: SLF001
+        task = await session.get(Task, "task-fp-screening")
+        assert task is not None
+        task.status_id = int(TaskStatus.PENDING_SCREEN)
+
+    assert await db.pending_pool_deficits(targets) == [
+        PoolDeficit("sub-king", PoolType.POOL_TWO, 1)
+    ]
+
+
 async def test_insert_records_metrics_and_utc_created_at(db: GeneratorDb) -> None:
     metrics = GenerationMetrics(
         model="deepseek/x",
@@ -282,7 +297,7 @@ async def test_check_constraint_rejects_out_of_range_status(db: GeneratorDb) -> 
                     king_id="sub-king",
                     pool_type=int(PoolType.POOL_ONE),
                     problem_statement="x",
-                    status_id=99,  # outside {0,1,2} -> ck_tasks_status_id violation
+                    status_id=99,  # outside TaskStatus -> ck_tasks_status_id violation
                     repo_clone_url="u",
                     parent_sha="p",
                     commit_sha="c",

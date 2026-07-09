@@ -14,13 +14,14 @@ class TaskStatus(IntEnum):
     """Lifecycle of a ``tasks`` row (the ``status_id`` column).
 
     The task-generator inserts ``CANDIDATE``; the task-solver runs the king and
-    flips it to ``QUALIFIED`` (king solved it → usable in a duel) or
-    ``DISQUALIFIED`` (king failed → drop it).
+    moves a viable solve to ``PENDING_SCREEN`` for difficulty scoring. The screen
+    then marks it ``QUALIFIED`` (usable in a duel) or ``DISQUALIFIED`` (drop it).
     """
 
     CANDIDATE = 0
     QUALIFIED = 1
     DISQUALIFIED = 2
+    PENDING_SCREEN = 3
 
 
 class PoolType(IntEnum):

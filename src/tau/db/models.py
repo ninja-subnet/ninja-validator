@@ -271,6 +271,7 @@ class Task(Base):
     rejected_fetch_error: Mapped[int | None] = mapped_column(SmallInteger)
 
     king: Mapped[King] = relationship(back_populates="tasks")
+    screening: Mapped[TaskScreening | None] = relationship(back_populates="task")
     solutions: Mapped[list[TaskSolution]] = relationship(back_populates="task")
     duel_solutions: Mapped[list[DuelTaskSolution]] = relationship(back_populates="task")
 
@@ -288,6 +289,86 @@ class Task(Base):
         ),
         CheckConstraint(
             f"pool_type IN ({_enum_values_sql(PoolType)})", name="ck_tasks_pool_type"
+        ),
+    )
+
+
+class TaskScreening(Base):
+    """King qualification solve and its single-task difficulty verdict.
+
+    There is exactly one mutable screening row per task. The task-solver creates it
+    with either a pending outcome (a viable patch awaiting scoring) or a terminal
+    disqualification (the king did not produce a viable patch). The screening worker
+    fills the nullable score-verdict telemetry before moving a pending task onward.
+    """
+
+    __tablename__ = "task_screenings"
+
+    task_id: Mapped[str] = mapped_column(
+        Text,
+        ForeignKey("tasks.task_id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    king_submission_id: Mapped[str] = mapped_column(
+        Text,
+        ForeignKey("submissions.submission_id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    qualification_solution: Mapped[str] = mapped_column(Text, nullable=False)
+    qualification_duration_seconds: Mapped[float] = mapped_column(
+        Float, nullable=False
+    )
+    qualification_exit_reason: Mapped[str] = mapped_column(Text, nullable=False)
+    qualification_usage_summary: Mapped[dict | None] = mapped_column(JSONB)
+
+    # Filled by the single-candidate difficulty scorer. Scores use the same 0..1
+    # normalized range as duel judgement scores.
+    king_score: Mapped[float | None] = mapped_column(Float)
+    max_score: Mapped[float | None] = mapped_column(Float)
+    outcome: Mapped[str] = mapped_column(Text, nullable=False)
+    reason: Mapped[str | None] = mapped_column(Text)
+    model: Mapped[str | None] = mapped_column(Text)
+    rationale: Mapped[str | None] = mapped_column(Text)
+    error: Mapped[str | None] = mapped_column(Text)
+    attempts: Mapped[int | None] = mapped_column(SmallInteger)
+    score_duration_seconds: Mapped[float | None] = mapped_column(Float)
+    created_at: Mapped[dt.datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[dt.datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+        onupdate=func.now(),
+    )
+
+    task: Mapped[Task] = relationship(back_populates="screening")
+
+    __table_args__ = (
+        CheckConstraint(
+            "qualification_duration_seconds >= 0",
+            name="ck_task_screenings_qualification_duration",
+        ),
+        CheckConstraint(
+            "king_score IS NULL OR (king_score >= 0 AND king_score <= 1)",
+            name="ck_task_screenings_king_score",
+        ),
+        CheckConstraint(
+            "max_score IS NULL OR (max_score >= 0 AND max_score <= 1)",
+            name="ck_task_screenings_max_score",
+        ),
+        CheckConstraint(
+            "outcome IN ('pending', 'qualified', 'disqualified')",
+            name="ck_task_screenings_outcome",
+        ),
+        CheckConstraint(
+            "attempts IS NULL OR attempts >= 0",
+            name="ck_task_screenings_attempts",
+        ),
+        CheckConstraint(
+            "score_duration_seconds IS NULL OR score_duration_seconds >= 0",
+            name="ck_task_screenings_score_duration",
         ),
     )
 

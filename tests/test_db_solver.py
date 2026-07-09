@@ -14,6 +14,7 @@ from pathlib import Path
 import pytest
 from dotenv import load_dotenv
 from sqlalchemy import make_url, select, text
+from sqlalchemy.exc import IntegrityError
 
 from tau.db import SolverDb, TaskStatus
 from tau.db.engine import create_db_engine, session_factory, session_scope
@@ -24,7 +25,7 @@ from tau.db.models import (
     King,
     Submission,
     Task,
-    TaskSolution,
+    TaskScreening,
 )
 from tau.db.solver import _duel_side_order
 from tau.pools import PoolTargets
@@ -166,7 +167,7 @@ def test_qualification_jobs_respects_limit(db: SolverDb) -> None:
     assert len(db.next_qualification_jobs(2)) == 2
 
 
-def test_finish_qualification_qualified_sets_status_without_cached_solution(
+def test_finish_qualification_viable_moves_to_pending_and_records_solve(
     db: SolverDb,
 ) -> None:
     def seed(s):  # noqa: ANN001
@@ -178,14 +179,23 @@ def test_finish_qualification_qualified_sets_status_without_cached_solution(
     db.finish_qualification(
         task_id="t1", king_submission_id="king-1", qualified=True,
         solution="diff --git a/x b/x", duration=1.2, exit_reason="completed",
+        usage_summary={"request_count": 2, "api_key": "must-not-persist"},
     )
     with session_scope(session_factory(db._engine)) as session:  # noqa: SLF001
         task = session.get(Task, "t1")
-        assert task.status_id == int(TaskStatus.QUALIFIED)
-        assert session.get(TaskSolution, {"task_id": "t1", "submission_id": "king-1"}) is None
+        screening = session.get(TaskScreening, "t1")
+        assert task.status_id == int(TaskStatus.PENDING_SCREEN)
+        assert screening.king_submission_id == "king-1"
+        assert screening.qualification_solution == "diff --git a/x b/x"
+        assert screening.qualification_duration_seconds == pytest.approx(1.2)
+        assert screening.qualification_exit_reason == "completed"
+        assert screening.qualification_usage_summary == {"request_count": 2}
+        assert screening.outcome == "pending"
+        assert screening.reason is None
+        assert screening.king_score is None
 
 
-def test_finish_qualification_disqualified_sets_status_no_solution(db: SolverDb) -> None:
+def test_finish_qualification_non_viable_disqualifies_with_audit(db: SolverDb) -> None:
     def seed(s):  # noqa: ANN001
         _submission(s, "king-1")
         _king(s, "king-1")
@@ -198,8 +208,71 @@ def test_finish_qualification_disqualified_sets_status_no_solution(db: SolverDb)
     )
     with session_scope(session_factory(db._engine)) as session:  # noqa: SLF001
         assert session.get(Task, "t1").status_id == int(TaskStatus.DISQUALIFIED)
-        rows = session.scalars(select(TaskSolution)).all()
-        assert rows == []
+        screening = session.get(TaskScreening, "t1")
+        assert screening.qualification_solution == ""
+        assert screening.qualification_duration_seconds == pytest.approx(0.5)
+        assert screening.qualification_exit_reason == "time_limit_exceeded"
+        assert screening.outcome == "disqualified"
+        assert screening.reason == "king_failed"
+
+
+def test_finish_qualification_ignores_stale_non_candidate_completion(
+    db: SolverDb,
+) -> None:
+    def seed(s):  # noqa: ANN001
+        _submission(s, "king-1")
+        _king(s, "king-1")
+        _task(
+            s,
+            "t1",
+            "king-1",
+            pool_type=1,
+            status_id=int(TaskStatus.DISQUALIFIED),
+            fp="f1",
+        )
+
+    _seed(db, seed)
+    db.finish_qualification(
+        task_id="t1",
+        king_submission_id="king-1",
+        qualified=True,
+        solution="late patch",
+        duration=1.2,
+        exit_reason="completed",
+    )
+    with session_scope(session_factory(db._engine)) as session:  # noqa: SLF001
+        assert session.get(Task, "t1").status_id == int(TaskStatus.DISQUALIFIED)
+        assert session.get(TaskScreening, "t1") is None
+
+
+def test_finish_qualification_rolls_back_status_if_audit_insert_fails(
+    db: SolverDb,
+) -> None:
+    def seed(s):  # noqa: ANN001
+        _submission(s, "king-1")
+        _king(s, "king-1")
+        _task(
+            s,
+            "t1",
+            "king-1",
+            pool_type=1,
+            status_id=int(TaskStatus.CANDIDATE),
+            fp="f1",
+        )
+
+    _seed(db, seed)
+    with pytest.raises(IntegrityError):
+        db.finish_qualification(
+            task_id="t1",
+            king_submission_id="king-1",
+            qualified=True,
+            solution="patch",
+            duration=-1.0,
+            exit_reason="completed",
+        )
+    with session_scope(session_factory(db._engine)) as session:  # noqa: SLF001
+        assert session.get(Task, "t1").status_id == int(TaskStatus.CANDIDATE)
+        assert session.get(TaskScreening, "t1") is None
 
 
 # -- phase B: fresh duel solves ----------------------------------------------------
@@ -223,6 +296,14 @@ def _seed_active_challenge(db: SolverDb) -> None:
         # Wrong pool_type / not qualified -> must be excluded.
         _task(s, "t-wrongpool", "king-1", pool_type=2, status_id=int(TaskStatus.QUALIFIED), fp="f2")
         _task(s, "t-candidate", "king-1", pool_type=1, status_id=int(TaskStatus.CANDIDATE), fp="f3")
+        _task(
+            s,
+            "t-pending-screen",
+            "king-1",
+            pool_type=1,
+            status_id=int(TaskStatus.PENDING_SCREEN),
+            fp="f-pending",
+        )
 
     _seed(db, seed)
 

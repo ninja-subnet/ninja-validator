@@ -3,7 +3,7 @@
 Each tick gathers up to ``max_containers`` jobs and runs them **concurrently** (one
 sandbox per job, capped at ``max_containers``):
   Phase A (qualification): CANDIDATE tasks of the reigning king → run the king's
-    agent → QUALIFIED or DISQUALIFIED.
+    agent → PENDING_SCREEN or DISQUALIFIED.
   Phase B (duel solve): QUALIFIED tasks in active challenges whose king or challenger
     side lacks a fresh challenge-scoped solution → run that side's agent → store the
     solution for the judge.
@@ -289,12 +289,13 @@ def _qualify(
         solution=result.solution_diff,
         duration=result.elapsed_seconds,
         exit_reason=result.exit_reason,
+        usage_summary=result.usage.to_dict() if result.usage is not None else None,
     )
     log.info(
-        "qualified task=%s king=%s -> %s (exit=%s, %d changed lines)",
+        "qualification task=%s king=%s -> %s (exit=%s, %d changed lines)",
         job.task_id,
         job.submission_id,
-        "QUALIFIED" if qualified else "DISQUALIFIED",
+        "PENDING_SCREEN" if qualified else "DISQUALIFIED",
         result.exit_reason,
         _changed_lines(result.solution_diff),
     )
@@ -304,7 +305,8 @@ def _qualify(
         task_id=job.task_id,
         submission_id=job.submission_id,
         exit_reason=result.exit_reason,
-        qualified=qualified,
+        viable=qualified,
+        status=("pending_screen" if qualified else "disqualified"),
         elapsed_seconds=result.elapsed_seconds,
         changed_lines=_changed_lines(result.solution_diff),
     )

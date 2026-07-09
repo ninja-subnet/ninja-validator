@@ -14,12 +14,14 @@ from tau.db.models import (
     Submission,
     SubmissionQualification,
     Task,
+    TaskScreening,
 )
 
 
 def test_task_status_values_are_stable() -> None:
     # These ints are persisted in tasks.status_id — they must not drift.
     assert (TaskStatus.CANDIDATE, TaskStatus.QUALIFIED, TaskStatus.DISQUALIFIED) == (0, 1, 2)
+    assert TaskStatus.PENDING_SCREEN == 3
 
 
 def test_submission_status_values_are_stable() -> None:
@@ -122,6 +124,64 @@ def test_submission_qualification_table_shape() -> None:
         "created_at",
         "updated_at",
     } <= cols
+
+
+def test_task_screening_table_shape_and_foreign_keys() -> None:
+    assert [c.name for c in TaskScreening.__table__.primary_key.columns] == ["task_id"]
+    cols = TaskScreening.__table__.columns
+    assert {
+        "task_id",
+        "king_submission_id",
+        "qualification_solution",
+        "qualification_duration_seconds",
+        "qualification_exit_reason",
+        "qualification_usage_summary",
+        "king_score",
+        "max_score",
+        "outcome",
+        "reason",
+        "model",
+        "rationale",
+        "error",
+        "attempts",
+        "score_duration_seconds",
+        "created_at",
+        "updated_at",
+    } == set(cols.keys())
+    for name in (
+        "task_id",
+        "king_submission_id",
+        "qualification_solution",
+        "qualification_duration_seconds",
+        "qualification_exit_reason",
+        "outcome",
+        "created_at",
+        "updated_at",
+    ):
+        assert cols[name].nullable is False, name
+    fk_targets = {
+        (fk.parent.name, fk.column.table.name, fk.column.name)
+        for fk in TaskScreening.__table__.foreign_keys
+    }
+    assert ("task_id", "tasks", "task_id") in fk_targets
+    assert (
+        "king_submission_id",
+        "submissions",
+        "submission_id",
+    ) in fk_targets
+
+
+def test_task_screening_checks_bound_scores_and_outcomes() -> None:
+    checks = {
+        c.name: str(c.sqltext)
+        for c in TaskScreening.__table__.constraints
+        if isinstance(c, CheckConstraint)
+    }
+    assert "ck_task_screenings_king_score" in checks
+    assert "ck_task_screenings_max_score" in checks
+    assert "ck_task_screenings_outcome" in checks
+    for outcome in ("pending", "qualified", "disqualified"):
+        assert outcome in checks["ck_task_screenings_outcome"]
 
 
 def test_challenge_status_values_are_stable() -> None:

@@ -170,7 +170,7 @@ def test_qualification_terminal_outcome_persists(monkeypatch, result) -> None:
     _stub_run(monkeypatch, result)
     db, cfg = _FakeDb(), _config()
     _qualify(db, cfg)
-    assert len(db.qualifications) == 1  # a verdict is recorded (QUALIFIED/DISQUALIFIED)
+    assert len(db.qualifications) == 1  # a solve is recorded (pending/disqualified)
     assert db.qualifications[0]["exit_reason"] == result.exit_reason
 
 
@@ -179,6 +179,25 @@ def test_qualification_agent_error_disqualifies(monkeypatch) -> None:
     db, cfg = _FakeDb(), _config()
     _qualify(db, cfg)
     assert db.qualifications[0]["qualified"] is False
+
+
+def test_qualification_viable_solve_forwards_usage_summary(monkeypatch) -> None:
+    usage = SimpleNamespace(to_dict=lambda: {"request_count": 1, "total_tokens": 42})
+    result = AgentRunResult(
+        success=True,
+        solution_diff="+added\n",
+        exit_reason=EXIT_COMPLETED,
+        elapsed_seconds=1.0,
+        usage=usage,
+    )
+    _stub_run(monkeypatch, result)
+    db, cfg = _FakeDb(), _config()
+    _qualify(db, cfg)
+    assert db.qualifications[0]["qualified"] is True
+    assert db.qualifications[0]["usage_summary"] == {
+        "request_count": 1,
+        "total_tokens": 42,
+    }
 
 
 # -- duel --------------------------------------------------------------------

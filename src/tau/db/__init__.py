@@ -9,8 +9,8 @@ instance from `connect()`), wrapped by `adapters.DatabaseSnapshotSink`:
     db = connect()                          # env-resolved DATABASE_URL
     sink = DatabaseSnapshotSink(db)         # ready for bittensor.worker.run(...)
 
-The task-generator and judge workers use their own focused seams,
-`GeneratorDb` and `JudgeDb`.
+The task-generator, task-screener, and judge workers use their own focused seams:
+`GeneratorDb`, `TaskScreeningDb`, and `JudgeDb`.
 """
 
 from __future__ import annotations
@@ -30,6 +30,7 @@ from .status import (
     SubmissionStatus,
     TaskStatus,
 )
+from .task_screening import TaskScreenRequest, TaskScreeningDb
 from .weight_setter import WeightSetterDb
 
 __all__ = [
@@ -52,6 +53,8 @@ __all__ = [
     "PoolType",
     "SubmissionStatus",
     "TaskStatus",
+    "TaskScreenRequest",
+    "TaskScreeningDb",
     "WeightSetterDb",
     "database_url",
     "session_scope",

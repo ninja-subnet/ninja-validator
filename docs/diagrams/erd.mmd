@@ -5,10 +5,16 @@ erDiagram
     kings ||--o{ challenges : "contested by"
     kings ||--o{ tasks : "pools for"
     challenges ||--o{ duel_resolutions : "verdict per pool"
+    tasks ||--o| task_screenings : "screened once"
+    submissions ||--o{ task_screenings : "king qualification"
     tasks ||--o{ task_solutions : "solved by"
     submissions ||--o{ task_solutions : "produces"
-    task_solutions ||--o{ judgements : "king side"
-    task_solutions ||--o{ judgements : "challenger side"
+    tasks ||--o{ duel_task_solutions : "duel inputs"
+    submissions ||--o{ duel_task_solutions : "produces"
+    challenges ||--o{ duel_task_solutions : "scopes"
+    tasks ||--o{ judgements : "judged on"
+    submissions ||--o{ judgements : "king side"
+    challenges ||--o{ judgements : "challenger side"
 
     submissions {
         text submission_id PK
@@ -40,7 +46,7 @@ erDiagram
     tasks {
         text task_id PK
         int pool_type "PoolType 1/2"
-        int status_id "TaskStatus 0/1/2"
+        int status_id "TaskStatus 0/1/2/3"
         text king_id FK
         text problem_statement
         text repo_clone_url
@@ -49,6 +55,20 @@ erDiagram
         text reference_patch
         text content_fingerprint UK
     }
+    task_screenings {
+        text task_id PK "FK tasks"
+        text king_submission_id FK
+        text qualification_solution
+        jsonb qualification_usage_summary
+        float king_score "normalized 0..1"
+        float max_score "decision ceiling"
+        text outcome "pending/qualified/disqualified"
+        text reason
+        text model
+        text rationale
+        text error
+        int attempts
+    }
     task_solutions {
         text task_id PK "FK tasks"
         text submission_id PK "FK submissions"
@@ -56,10 +76,19 @@ erDiagram
         float duration
         text exit_reason
     }
+    duel_task_solutions {
+        text task_id PK "FK tasks"
+        text challenger_submission_id PK "FK challenges"
+        text submission_id PK "FK submissions"
+        text solution "fresh unified diff"
+        float duration
+        text exit_reason
+        jsonb usage_summary
+    }
     judgements {
         text task_id PK
-        text king_submission_id PK "FK task_solutions"
-        text challenger_submission_id PK "FK task_solutions"
+        text king_submission_id PK "FK submissions"
+        text challenger_submission_id PK "FK challenges"
         text llm_winner
         float king_score
         float challenger_score

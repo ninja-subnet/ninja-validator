@@ -62,9 +62,9 @@ class GeneratorDb:
         Finds the reigning king (latest ``king_from``) and its per-pool
         non-DISQUALIFIED task counts in a single session, so the king and its
         counts are a consistent snapshot — no window in which the king changes
-        between two reads. Counting CANDIDATE + QUALIFIED (everything not
-        DISQUALIFIED) lets the generator stop once enough tasks are in flight and
-        resume as the solver drops bad ones.
+        between two reads. Counting every non-DISQUALIFIED state (CANDIDATE,
+        PENDING_SCREEN, and QUALIFIED) lets the generator stop once enough tasks
+        are in flight and resume as the solver or task-screener drops bad ones.
 
         Returns one :class:`PoolDeficit` per pool still under target, in ``PoolType``
         order (POOL_ONE first, so earlier pools fill first). An **empty list**

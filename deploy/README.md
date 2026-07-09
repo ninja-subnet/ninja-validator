@@ -39,15 +39,18 @@ psql "postgresql://appuser:...@localhost:5432/arena"
 ## Schema
 
 Generated from the ERD plus migration refinements. Core tables include
-`submissions`, `kings`, `challenges`, `tasks`, `duel_task_solutions`,
-`task_solutions`, `judgements`, and `registrations`. Notable modeling choices:
+`submissions`, `kings`, `challenges`, `tasks`, `task_screenings`,
+`duel_task_solutions`, `task_solutions`, `judgements`, and `registrations`.
+Notable modeling choices:
 
-- Composite primary keys on `challenges`, `duel_task_solutions`, `task_solutions`,
-  and `judgements`.
+- Composite primary keys on `duel_resolutions`, `duel_task_solutions`,
+  `task_solutions`, and `judgements`.
 - `duel_task_solutions` is scoped by `(task_id, challenger_submission_id,
   submission_id)`, so the king is solved fresh for each challenge rather than reused
   from a task-wide cache.
 - `tasks` hangs off a king via `king_id`, carrying a `pool_type` discriminator.
+- `task_screenings` stores the king's qualification patch and the independent
+  single-candidate difficulty verdict before a task becomes duel-eligible.
 - `registrations` had no key in the ERD, so it gets a surrogate `id` plus a
   `(uid, block)` uniqueness guard.
 - Every foreign key is indexed (Postgres does not do this automatically), and

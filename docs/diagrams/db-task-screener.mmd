@@ -1,0 +1,17 @@
+%%{init: {"theme": "base", "themeVariables": {"fontSize": "15px"}}}%%
+flowchart LR
+    sc(["task-screener"])
+    kings[("kings")]
+    tasks[("tasks")]
+    screen[("task_screenings")]
+
+    sc -. "R  reigning king" .-> kings
+    sc -. "R  PENDING_SCREEN tasks" .-> tasks
+    sc -. "R  qualification patch +<br/>pending/error telemetry" .-> screen
+    sc == "W  guarded status update:<br/>QUALIFIED / DISQUALIFIED" ==> tasks
+    sc == "W  score, ceiling, outcome,<br/>reason, model, rationale,<br/>attempt/error telemetry" ==> screen
+
+    classDef worker fill:#2563eb,stroke:#1e3a8a,color:#fff;
+    classDef store fill:#f59e0b,stroke:#b45309,color:#111;
+    class sc worker;
+    class kings,tasks,screen store;
