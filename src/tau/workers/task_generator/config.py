@@ -30,6 +30,8 @@ class GeneratorConfig:
     llm_timeout: float = 120.0
     # Idle sleep between controller polls (seconds).
     poll_seconds: float = 30.0
+    # Real qualification candidates kept in flight while any pool is incomplete.
+    qualification_inflight_target: int = 100
 
     # Token-free testing: swap the real LLM for tau.openrouter.DummyLLMClient. The
     # toggle is a generator-level decision; the behaviour knobs are tucked into a
@@ -48,6 +50,8 @@ class GeneratorConfig:
             raise ValueError("llm_timeout must be positive")
         if self.poll_seconds <= 0:
             raise ValueError("poll_seconds must be positive")
+        if self.qualification_inflight_target < 1:
+            raise ValueError("qualification_inflight_target must be >= 1")
 
     @classmethod
     def from_env(cls, environ: Mapping[str, str] | None = None) -> GeneratorConfig:
@@ -77,6 +81,11 @@ class GeneratorConfig:
                 env, "TAU_GENERATOR_LLM_TIMEOUT", d.llm_timeout
             ),
             poll_seconds=env_float(env, "TAU_GENERATOR_POLL_SECONDS", d.poll_seconds),
+            qualification_inflight_target=env_int(
+                env,
+                "TAU_GENERATOR_QUALIFICATION_INFLIGHT_TARGET",
+                d.qualification_inflight_target,
+            ),
             use_dummy_llm=use_dummy_llm,
             dummy=DummyLLMConfig(
                 avg_latency_seconds=env_float(

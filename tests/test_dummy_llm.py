@@ -109,6 +109,7 @@ def test_generator_config_dummy_from_env_needs_no_api_key() -> None:
             "TAU_GENERATOR_DUMMY_AVG_LATENCY": "3",
             "TAU_GENERATOR_DUMMY_SLOW_RATE": "0.1",
             "TAU_GENERATOR_DUMMY_FAILURE_RATE": "0.25",
+            "TAU_GENERATOR_QUALIFICATION_INFLIGHT_TARGET": "75",
         }
     )
     assert config.use_dummy_llm is True
@@ -116,8 +117,14 @@ def test_generator_config_dummy_from_env_needs_no_api_key() -> None:
     assert config.dummy.avg_latency_seconds == 3.0
     assert config.dummy.slow_rate == 0.1
     assert config.dummy.failure_rate == 0.25
+    assert config.qualification_inflight_target == 75
 
 
 def test_generator_config_requires_api_key_without_dummy() -> None:
     with pytest.raises(OSError):
         GeneratorConfig.from_env({})
+
+
+def test_generator_config_rejects_empty_qualification_backlog() -> None:
+    with pytest.raises(ValueError, match="qualification_inflight_target"):
+        GeneratorConfig(openrouter_api_key="k", qualification_inflight_target=0)

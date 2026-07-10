@@ -6,7 +6,9 @@ import datetime as dt
 from dataclasses import dataclass
 from typing import Literal
 
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
+
+from tau.pools import PoolTargets
 
 from . import models
 from .engine import async_session_factory, async_session_scope, create_async_db_engine
@@ -30,6 +32,13 @@ class ScreeningFailureSave:
     state: FailureState
     failed_runs: int = 0
     next_retry_at: dt.datetime | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class ScreeningDecisionSave:
+    outcome: FinalScreeningOutcome
+    reason: str
+    surplus_disqualified: int = 0
 
 
 class TaskScreeningDb:
@@ -76,30 +85,81 @@ class TaskScreeningDb:
         max_score: float,
         reason: str,
         model: str | None,
-    ) -> bool:
-        """Atomically save a final screen and transition its pending task."""
+        pool_targets: PoolTargets = PoolTargets(),
+    ) -> ScreeningDecisionSave | None:
+        """Save a final screen, enforcing the pool target under one king lock."""
         if outcome not in ("qualified", "disqualified"):
             raise ValueError("invalid screening outcome")
         if king_score is not None and not 0 <= king_score <= 1:
             raise ValueError("king_score must be between 0 and 1")
         async with async_session_scope(self._sessions) as session:
-            task = await _lock_pending_task(session, task_id, king_submission_id)
+            king = (
+                await session.execute(
+                    select(models.King)
+                    .order_by(models.King.king_from.desc())
+                    .limit(1)
+                    .with_for_update()
+                )
+            ).scalar_one_or_none()
+            if king is None or king.king_id != king_submission_id:
+                return None
+            task = (
+                await session.execute(
+                    select(models.Task)
+                    .where(
+                        models.Task.task_id == task_id,
+                        models.Task.king_id == king_submission_id,
+                        models.Task.status_id == int(TaskStatus.PENDING_SCREEN),
+                    )
+                    .with_for_update()
+                )
+            ).scalar_one_or_none()
             if task is None:
-                return False
+                return None
             screening = await session.get(models.TaskScreening, task_id)
             if screening is None:
                 raise RuntimeError(f"pending task {task_id} has no screening row")
+
+            final_outcome, final_reason = outcome, reason
+            qualified_count = 0
+            pool_target = pool_targets.target(task.pool_type)
+            if outcome == "qualified":
+                qualified_count = int(
+                    await session.scalar(
+                        select(func.count())
+                        .select_from(models.Task)
+                        .where(
+                            models.Task.king_id == king_submission_id,
+                            models.Task.pool_type == task.pool_type,
+                            models.Task.status_id == int(TaskStatus.QUALIFIED),
+                        )
+                    )
+                    or 0
+                )
+                if qualified_count >= pool_target:
+                    final_outcome = "disqualified"
+                    final_reason = "pool_full_surplus"
+
             screening.king_score = king_score
             screening.max_score = max_score
-            screening.reason = reason
+            screening.reason = final_reason
             screening.model = model
             screening.next_retry_at = None
             task.status_id = int(
                 TaskStatus.QUALIFIED
-                if outcome == "qualified"
+                if final_outcome == "qualified"
                 else TaskStatus.DISQUALIFIED
             )
-        return True
+            surplus = 0
+            if outcome == "qualified" and (
+                qualified_count >= pool_target
+                or qualified_count + 1 == pool_target
+            ):
+                await session.flush()
+                surplus = await _disqualify_surplus(
+                    session, king_submission_id, task.pool_type
+                )
+            return ScreeningDecisionSave(final_outcome, final_reason, surplus)
 
     async def save_error(
         self,
@@ -171,3 +231,25 @@ def _reigning_king_id():
         .limit(1)
         .scalar_subquery()
     )
+
+
+async def _disqualify_surplus(session, king_id: str, pool_type: int) -> int:
+    """Drop queued work once a pool reaches its exact admission target."""
+    surplus_ids = select(models.Task.task_id).where(
+        models.Task.king_id == king_id,
+        models.Task.pool_type == pool_type,
+        models.Task.status_id.in_(
+            (int(TaskStatus.CANDIDATE), int(TaskStatus.PENDING_SCREEN))
+        ),
+    )
+    await session.execute(
+        update(models.TaskScreening)
+        .where(models.TaskScreening.task_id.in_(surplus_ids))
+        .values(reason="pool_full_surplus", next_retry_at=None)
+    )
+    result = await session.execute(
+        update(models.Task)
+        .where(models.Task.task_id.in_(surplus_ids))
+        .values(status_id=int(TaskStatus.DISQUALIFIED))
+    )
+    return result.rowcount

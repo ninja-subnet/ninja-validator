@@ -97,7 +97,12 @@ async def _controller(
 ) -> None:
     while True:
         try:
-            launched = work.sync_to_deficits(await db.pending_pool_deficits(targets))
+            launched = work.sync_to_deficits(
+                await db.pending_pool_deficits(
+                    targets,
+                    qualification_inflight_target=config.qualification_inflight_target,
+                )
+            )
             if launched:
                 log.info(
                     "controller: launched %d task(s) for king %s",

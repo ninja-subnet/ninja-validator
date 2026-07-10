@@ -157,11 +157,22 @@ async def _insert(
     )
 
 
+async def _set_status(
+    db: GeneratorDb, fingerprint: str, status: TaskStatus
+) -> None:
+    async with async_session_scope(db._sessions) as session:  # noqa: SLF001
+        task = await session.get(Task, f"task-{fingerprint}")
+        assert task is not None
+        task.status_id = int(status)
+
+
 async def test_pending_pool_deficits_empty_without_king(db: GeneratorDb) -> None:
     async with async_session_scope(db._sessions) as session:  # noqa: SLF001
         await session.delete(await session.get(King, "sub-king"))
     # No reigning king -> nothing to generate.
-    assert await db.pending_pool_deficits(PoolTargets()) == []
+    assert await db.pending_pool_deficits(
+        PoolTargets(), qualification_inflight_target=100
+    ) == []
 
 
 async def test_insert_is_idempotent_on_fingerprint(db: GeneratorDb) -> None:
@@ -183,24 +194,60 @@ async def test_inserted_task_is_a_candidate(db: GeneratorDb) -> None:
 async def test_pending_pool_deficits_reports_deficit_in_order(db: GeneratorDb) -> None:
     targets = PoolTargets(pool_one=2, pool_two=1)
     # Empty -> full deficit for both pools, pool one first, tagged with the king.
-    assert await db.pending_pool_deficits(targets) == [
+    assert await db.pending_pool_deficits(
+        targets, qualification_inflight_target=3
+    ) == [
         PoolDeficit("sub-king", PoolType.POOL_ONE, 2),
         PoolDeficit("sub-king", PoolType.POOL_TWO, 1),
     ]
     # One pool-one task lands -> its deficit drops by one.
     await _insert(db, fingerprint="fp-p1a", pool=PoolType.POOL_ONE)
-    assert await db.pending_pool_deficits(targets) == [
+    assert await db.pending_pool_deficits(
+        targets, qualification_inflight_target=3
+    ) == [
         PoolDeficit("sub-king", PoolType.POOL_ONE, 1),
         PoolDeficit("sub-king", PoolType.POOL_TWO, 1),
     ]
-    # Fill pool one -> only pool two remains.
+    # Fill pool one's qualification backlog -> only pool two needs generation.
     await _insert(db, fingerprint="fp-p1b", pool=PoolType.POOL_ONE)
-    assert await db.pending_pool_deficits(targets) == [
+    assert await db.pending_pool_deficits(
+        targets, qualification_inflight_target=3
+    ) == [
         PoolDeficit("sub-king", PoolType.POOL_TWO, 1)
     ]
-    # Fill pool two -> nothing left.
+    # Fill pool two's qualification backlog -> nothing else to generate yet.
     await _insert(db, fingerprint="fp-p2", pool=PoolType.POOL_TWO)
-    assert await db.pending_pool_deficits(targets) == []
+    assert await db.pending_pool_deficits(
+        targets, qualification_inflight_target=3
+    ) == []
+
+
+async def test_generation_keeps_full_load_near_final_pool_slots(
+    db: GeneratorDb,
+) -> None:
+    targets = PoolTargets(pool_one=2, pool_two=2)
+    for fingerprint, pool in (("p1-a", PoolType.POOL_ONE), ("p2-a", PoolType.POOL_TWO)):
+        await _insert(db, fingerprint=fingerprint, pool=pool)
+        await _set_status(db, fingerprint, TaskStatus.QUALIFIED)
+
+    assert await db.pending_pool_deficits(
+        targets, qualification_inflight_target=6
+    ) == [
+        PoolDeficit("sub-king", PoolType.POOL_ONE, 3),
+        PoolDeficit("sub-king", PoolType.POOL_TWO, 3),
+    ]
+
+    await _insert(db, fingerprint="p1-b", pool=PoolType.POOL_ONE)
+    await _set_status(db, "p1-b", TaskStatus.QUALIFIED)
+    assert await db.pending_pool_deficits(
+        targets, qualification_inflight_target=6
+    ) == [PoolDeficit("sub-king", PoolType.POOL_TWO, 6)]
+
+    await _insert(db, fingerprint="p2-b", pool=PoolType.POOL_TWO)
+    await _set_status(db, "p2-b", TaskStatus.QUALIFIED)
+    assert await db.pending_pool_deficits(
+        targets, qualification_inflight_target=6
+    ) == []
 
 
 async def test_pending_pool_deficits_ignores_disqualified(db: GeneratorDb) -> None:
@@ -222,7 +269,9 @@ async def test_pending_pool_deficits_ignores_disqualified(db: GeneratorDb) -> No
             )
         )
     # Pool one still needs its one task despite the disqualified row.
-    assert await db.pending_pool_deficits(targets) == [
+    assert await db.pending_pool_deficits(
+        targets, qualification_inflight_target=2
+    ) == [
         PoolDeficit("sub-king", PoolType.POOL_ONE, 1),
         PoolDeficit("sub-king", PoolType.POOL_TWO, 1),
     ]
@@ -238,7 +287,9 @@ async def test_pending_pool_deficits_counts_pending_screen_as_in_flight(
         assert task is not None
         task.status_id = int(TaskStatus.PENDING_SCREEN)
 
-    assert await db.pending_pool_deficits(targets) == [
+    assert await db.pending_pool_deficits(
+        targets, qualification_inflight_target=2
+    ) == [
         PoolDeficit("sub-king", PoolType.POOL_TWO, 1)
     ]
 

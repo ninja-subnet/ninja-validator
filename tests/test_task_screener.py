@@ -8,7 +8,11 @@ from dataclasses import replace
 
 import pytest
 
-from tau.db.task_screening import ScreeningFailureSave, TaskScreenRequest
+from tau.db.task_screening import (
+    ScreeningDecisionSave,
+    ScreeningFailureSave,
+    TaskScreenRequest,
+)
 from tau.openrouter import RenderablePrompt
 from tau.task_screening import Candidate, Task
 from tau.workers.judge.config import JudgeWorkerConfig
@@ -61,9 +65,9 @@ class FakeDb:
         self.include_deferred.append(include_deferred)
         return list(self.requests)
 
-    async def save_decision(self, **values) -> bool:
+    async def save_decision(self, **values) -> ScreeningDecisionSave:
         self.decisions.append(values)
-        return True
+        return ScreeningDecisionSave(values["outcome"], values["reason"])
 
     async def save_error(self, **values) -> ScreeningFailureSave:
         self.errors.append(values)
@@ -117,6 +121,8 @@ def test_config_reads_screen_policy_and_shared_judge_overrides() -> None:
             "TAU_JUDGE_MODEL": "shared/model",
             "TAU_JUDGE_ATTEMPTS": "2",
             "TAU_JUDGE_LLM_TIMEOUT": "30",
+            "TAU_POOL_ONE_TARGET": "7",
+            "TAU_POOL_TWO_TARGET": "9",
         }
     )
 
@@ -134,6 +140,7 @@ def test_config_reads_screen_policy_and_shared_judge_overrides() -> None:
         config.retry_base_seconds,
         config.retry_max_seconds,
     ) == (0.75, 3, 5, 10, 80)
+    assert (config.pool_targets.pool_one, config.pool_targets.pool_two) == (7, 9)
 
 
 def test_disabled_mode_needs_no_key_or_llm_config() -> None:

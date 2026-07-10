@@ -1,7 +1,7 @@
 """The task-solver's two-phase loop.
 
-Each tick gathers up to ``max_containers`` jobs and runs them **concurrently** (one
-sandbox per job, capped at ``max_containers``):
+The scheduler keeps up to ``max_containers`` jobs running **concurrently** (one
+sandbox per job), refilling free slots without waiting for stragglers:
   Phase A (qualification): CANDIDATE tasks of the reigning king → run the king's
     agent → PENDING_SCREEN or DISQUALIFIED.
   Phase B (duel solve): QUALIFIED tasks in active challenges whose king or challenger

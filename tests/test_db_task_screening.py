@@ -11,7 +11,7 @@ from pathlib import Path
 import pytest
 import pytest_asyncio
 from dotenv import load_dotenv
-from sqlalchemy import make_url, text
+from sqlalchemy import make_url, select, text
 
 from tau.db.engine import async_session_scope, create_async_db_engine, create_db_engine
 from tau.db.generator import GeneratorDb, PoolDeficit
@@ -102,13 +102,14 @@ async def _add_screening(
     *,
     king_id: str,
     status: TaskStatus = TaskStatus.PENDING_SCREEN,
+    pool_type: PoolType = PoolType.POOL_ONE,
     next_retry_at: dt.datetime | None = None,
 ) -> None:
     async with async_session_scope(db._sessions) as session:  # noqa: SLF001
         session.add(
             Task(
                 task_id=task_id,
-                pool_type=1,
+                pool_type=int(pool_type),
                 problem_statement=f"problem {task_id}",
                 status_id=int(status),
                 king_id=king_id,
@@ -226,7 +227,9 @@ async def test_failures_back_off_then_disqualify_and_refill(
 
     generator = GeneratorDb(_TEST_URL)
     try:
-        deficits = await generator.pending_pool_deficits(PoolTargets(1, 1))
+        deficits = await generator.pending_pool_deficits(
+            PoolTargets(1, 1), qualification_inflight_target=2
+        )
     finally:
         await generator.aclose()
     assert PoolDeficit("king", PoolType.POOL_ONE, 1) in deficits
@@ -244,6 +247,50 @@ async def test_concurrent_failures_count_once_per_backoff_window(
     async with async_session_scope(db._sessions) as session:  # noqa: SLF001
         row = await session.get(TaskScreening, "task")
     assert row is not None and row.failed_runs == 1
+
+
+async def test_concurrent_passing_screens_cannot_overfill_pool(
+    db: TaskScreeningDb,
+) -> None:
+    await _add_king(db, "king", dt.datetime.now(dt.UTC))
+    await _add_screening(db, "task-a", king_id="king")
+    await _add_screening(db, "task-b", king_id="king")
+
+    async def save(task_id: str):
+        return await db.save_decision(
+            task_id=task_id,
+            king_submission_id="king",
+            outcome="qualified",
+            king_score=0.4,
+            max_score=0.70,
+            reason="score_at_or_below_max",
+            model="test/model",
+            pool_targets=PoolTargets(1, 1),
+        )
+
+    results = await asyncio.gather(save("task-a"), save("task-b"))
+    assert sum(result is not None for result in results) == 1
+    assert sum(
+        result is not None and result.outcome == "qualified" for result in results
+    ) == 1
+    saved = next(result for result in results if result is not None)
+    assert saved.surplus_disqualified == 1
+
+    async with async_session_scope(db._sessions) as session:  # noqa: SLF001
+        tasks = (await session.scalars(select(Task).order_by(Task.task_id))).all()
+        screens = (
+            await session.scalars(
+                select(TaskScreening).order_by(TaskScreening.task_id)
+            )
+        ).all()
+    assert sorted(task.status_id for task in tasks) == [
+        int(TaskStatus.QUALIFIED),
+        int(TaskStatus.DISQUALIFIED),
+    ]
+    assert {row.reason for row in screens} == {
+        "score_at_or_below_max",
+        "pool_full_surplus",
+    }
 
 
 async def test_final_write_wins_and_late_results_are_ignored(

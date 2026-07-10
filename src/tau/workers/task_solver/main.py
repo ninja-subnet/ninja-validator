@@ -1,8 +1,7 @@
 """Entry point and dependency wiring for the task-solver worker.
 
 Builds the long-lived collaborators (Docker client, DB, sandbox image), installs
-signal handlers for a graceful stop, and hands them to the loop. Sync throughout:
-the orchestrator runs one sandbox at a time, so asyncio would add nothing.
+signal handlers for a graceful stop, and hands them to the threaded scheduler.
 """
 
 from __future__ import annotations

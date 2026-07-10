@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import os
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import StrEnum
 
+from tau.pools import PoolTargets
 from tau.utils.env import env_float, env_int, env_str
 from tau.workers.judge.config import JudgeWorkerConfig
 
@@ -29,6 +30,7 @@ class TaskScreenerConfig:
     max_failed_runs: int = 3
     retry_base_seconds: float = 60.0
     retry_max_seconds: float = 900.0
+    pool_targets: PoolTargets = field(default_factory=PoolTargets)
 
     def __post_init__(self) -> None:
         try:
@@ -93,4 +95,5 @@ class TaskScreenerConfig:
             retry_max_seconds=env_float(
                 env, "TAU_TASK_SCREEN_RETRY_MAX_SECONDS", defaults.retry_max_seconds
             ),
+            pool_targets=PoolTargets.from_env(env),
         )

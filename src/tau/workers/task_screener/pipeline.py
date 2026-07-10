@@ -212,19 +212,23 @@ async def _save_decision(
         max_score=config.max_king_score,
         reason=reason,
         model=model,
+        pool_targets=config.pool_targets,
     )
-    if not saved:
+    if saved is None:
         log.info("discarded stale task screen result for task %s", request.task_id)
         return
+    outcome, reason = saved.outcome, saved.reason
 
     log.info(
-        "screened task %s -> %s score=%s max=%.3f (%d attempt(s), %.1fs)",
+        "screened task %s -> %s score=%s max=%.3f (%d attempt(s), %.1fs, "
+        "%d surplus dropped)",
         request.task_id,
         outcome,
         score,
         config.max_king_score,
         attempts,
         duration_seconds,
+        saved.surplus_disqualified,
     )
     get_axiom().info(
         source="task-screener",
@@ -238,6 +242,7 @@ async def _save_decision(
         model=model,
         attempts=attempts,
         duration_seconds=duration_seconds,
+        surplus_disqualified=saved.surplus_disqualified,
     )
 
 

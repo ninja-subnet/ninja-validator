@@ -56,21 +56,28 @@ class GeneratorDb:
     async def aclose(self) -> None:
         await self._engine.dispose()
 
-    async def pending_pool_deficits(self, targets: PoolTargets) -> list[PoolDeficit]:
-        """Generation work for the reigning king, resolved in one transaction.
+    async def pending_pool_deficits(
+        self,
+        targets: PoolTargets,
+        *,
+        qualification_inflight_target: int,
+    ) -> list[PoolDeficit]:
+        """Generation work that keeps qualification load steady until pools fill.
 
         Finds the reigning king (latest ``king_from``) and its per-pool
         non-DISQUALIFIED task counts in a single session, so the king and its
-        counts are a consistent snapshot — no window in which the king changes
-        between two reads. Counting every non-DISQUALIFIED state (CANDIDATE,
-        PENDING_SCREEN, and QUALIFIED) lets the generator stop once enough tasks
-        are in flight and resume as the solver or task-screener drops bad ones.
+        counts are a consistent snapshot. A pool is complete only when its
+        ``QUALIFIED`` count reaches its target. Until then, the configured number
+        of real ``CANDIDATE``/``PENDING_SCREEN`` tasks is divided evenly among all
+        incomplete pools, keeping the solver loaded even near the final slots.
 
         Returns one :class:`PoolDeficit` per pool still under target, in ``PoolType``
         order (POOL_ONE first, so earlier pools fill first). An **empty list**
         means there is nothing to generate — either no king reigns or every pool
         is already full — and the worker should idle.
         """
+        if qualification_inflight_target < 1:
+            raise ValueError("qualification_inflight_target must be >= 1")
         king_stmt = (
             select(models.King.king_id)
             .order_by(models.King.king_from.desc())
@@ -80,24 +87,41 @@ class GeneratorDb:
             king_id = (await session.scalars(king_stmt)).first()
             if king_id is None:
                 return []  # no reigning king -> generate nothing
-            counts: dict[PoolType, int] = dict.fromkeys(PoolType, 0)
+            qualified: dict[PoolType, int] = dict.fromkeys(PoolType, 0)
+            active: dict[PoolType, int] = dict.fromkeys(PoolType, 0)
             count_stmt = (
-                select(models.Task.pool_type, func.count())
+                select(models.Task.pool_type, models.Task.status_id, func.count())
                 .where(
                     models.Task.king_id == king_id,
                     models.Task.status_id != int(TaskStatus.DISQUALIFIED),
                 )
-                .group_by(models.Task.pool_type)
+                .group_by(models.Task.pool_type, models.Task.status_id)
             )
-            for pool_type, count in await session.execute(count_stmt):
+            for pool_type, status_id, count in await session.execute(count_stmt):
                 try:
-                    counts[PoolType(pool_type)] = count
+                    pool = PoolType(pool_type)
                 except ValueError:
                     continue  # unknown pool_type — ignore
+                if status_id == int(TaskStatus.QUALIFIED):
+                    qualified[pool] += count
+                elif status_id in (
+                    int(TaskStatus.CANDIDATE),
+                    int(TaskStatus.PENDING_SCREEN),
+                ):
+                    active[pool] += count
+
+        incomplete = [
+            pool for pool in PoolType if qualified[pool] < targets.target(pool)
+        ]
+        if not incomplete:
+            return []
+        share, remainder = divmod(qualification_inflight_target, len(incomplete))
         return [
             PoolDeficit(king_id=king_id, pool=pool, deficit=deficit)
-            for pool in PoolType
-            if (deficit := targets.target(pool) - counts[pool]) > 0
+            for index, pool in enumerate(incomplete)
+            if (
+                deficit := share + int(index < remainder) - active[pool]
+            ) > 0
         ]
 
     async def fingerprint_exists(self, content_fingerprint: str) -> bool:

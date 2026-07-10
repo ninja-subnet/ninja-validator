@@ -56,7 +56,7 @@ class SolverConfig:
     # LRU cap on cached checkouts (0 = unbounded). Sized to hold an active king's
     # full task pool plus the previous pool while it drains.
     task_repo_cache_max_entries: int = 256
-    # Max sandboxes launched per loop tick (across both phases). Sequential.
+    # Max sandboxes running concurrently across qualification and duel solves.
     max_containers: int = 4
     poll_seconds: float = 30.0
     # The king must produce at least this many changed diff lines to QUALIFY a task.

@@ -51,6 +51,8 @@ async def _serve(config: TaskScreenerConfig) -> None:
             max_failed_runs=config.max_failed_runs,
             retry_base_seconds=config.retry_base_seconds,
             retry_max_seconds=config.retry_max_seconds,
+            pool_one_target=config.pool_targets.pool_one,
+            pool_two_target=config.pool_targets.pool_two,
         )
         try:
             await run_task_screener(db=db, clients=clients, config=config, stop=stop)

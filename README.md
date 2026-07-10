@@ -238,8 +238,8 @@ Idles whenever no king reigns.
 
 ### 7.3 task-solver
 
-The only worker that runs **untrusted miner code**. Each tick it does two jobs,
-up to `MAX_CONTAINERS` sandboxes in parallel:
+The only worker that runs **untrusted miner code**. Its scheduler does two jobs,
+keeping up to `MAX_CONTAINERS` sandboxes running in parallel:
 
 1. **Qualify** — run the **king's** agent on `CANDIDATE` tasks. If the king
    succeeds and changes at least `TAU_SOLVER_QUALIFY_MIN_CHANGED_LINES` lines,
@@ -252,12 +252,10 @@ up to `MAX_CONTAINERS` sandboxes in parallel:
 
 Active duel solves are prioritized; qualification jobs fill remaining capacity. See
 [§8](#8-agent-execution-environment-sandboxing) for how the sandbox works.
-`MAX_CONTAINERS` is both the per-tick batch size and the maximum number of
-concurrent sandboxes. After an idle or partial tick the worker waits
-`TAU_SOLVER_POLL_SECONDS` before polling again; after a saturated tick
-(`MAX_CONTAINERS` jobs launched, so backlog likely remains) it re-polls after
-~1s. The deployment example uses `MAX_CONTAINERS=50`, so 100 ready solves take
-2 ticks back to back.
+`MAX_CONTAINERS` is the maximum number of concurrent sandboxes. While work is
+running, the scheduler re-polls about once per second and fills each slot as soon
+as its previous job completes; it uses `TAU_SOLVER_POLL_SECONDS` only while idle.
+The deployment example uses `MAX_CONTAINERS=100` to match a 50-task, two-sided duel.
 
 | Loop | Database |
 |------|----------|
@@ -623,6 +621,7 @@ authoritative, commented list). Grouped by concern:
 | `TAU_GENERATOR_LLM_ATTEMPTS` | `2` | LLM tries per commit before abandoning it. |
 | `TAU_GENERATOR_LLM_TIMEOUT` | `120` | Per-attempt LLM timeout (s). |
 | `TAU_GENERATOR_POLL_SECONDS` | `30` | Idle poll interval. |
+| `TAU_GENERATOR_QUALIFICATION_INFLIGHT_TARGET` | `100` | Real candidate/screening tasks maintained across incomplete pools so qualification solve fan-out remains production-shaped near the final slots. |
 | `TAU_GENERATOR_USE_DUMMY_LLM` + `TAU_GENERATOR_DUMMY_*` | off | Token-free fabricated descriptions for testing (see `.env.example`). |
 
 ### task-screener tuning
@@ -670,8 +669,8 @@ authoritative, commented list). Grouped by concern:
 | Var | Default | Effect |
 |-----|---------|--------|
 | `SOLVER_MODEL` | required | Model the proxy forces every agent request onto. Set it in `.env`. |
-| `MAX_CONTAINERS` | `4` code fallback; `50` in `.env.example` | Max concurrent sandboxes per tick, and therefore the per-tick batch size. Size this to host and upstream capacity. |
-| `TAU_SOLVER_POLL_SECONDS` | `30` | Sleep after an idle or partial tick; a saturated tick re-polls after ~1s to drain backlog. |
+| `MAX_CONTAINERS` | `4` code fallback; `100` in `.env.example` | Max concurrently running qualification and duel sandboxes. Size this to host and upstream capacity. |
+| `TAU_SOLVER_POLL_SECONDS` | `30` | Idle poll interval; while work is running, free slots are refilled about once per second. |
 | `TAU_SOLVER_QUALIFY_MIN_CHANGED_LINES` | `1` | Min diff lines the king must change before a task advances to screening. |
 | `TAU_SOLVER_REQUIRE_FULL_POOL_FOR_DUELS` | `false` code fallback; `true` in `.env.example` | Wait until the active pool has target QUALIFIED tasks before scheduling duel solves. |
 | `TAU_SUBMISSIONS_DIR` | `submissions` | Host dir of extracted submissions (mounted read-only, same path). |

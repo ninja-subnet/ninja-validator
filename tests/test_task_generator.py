@@ -91,7 +91,9 @@ class FakeDb:
         self.inserted: dict[str, dict] = {}
         self.failures: list[dict] = []
 
-    async def pending_pool_deficits(self, targets: PoolTargets) -> list[PoolDeficit]:
+    async def pending_pool_deficits(
+        self, targets: PoolTargets, *, qualification_inflight_target: int
+    ) -> list[PoolDeficit]:
         if self.king is None:
             return []
         counts = Counter(
@@ -291,7 +293,11 @@ async def test_pipeline_fills_deficit_then_idles() -> None:
     llm = FakeLLM(_GOOD_JSON)
     config = _config(llm_attempts=1)
 
-    assert work.sync_to_deficits(await db.pending_pool_deficits(PoolTargets())) == 2
+    assert work.sync_to_deficits(
+        await db.pending_pool_deficits(
+            PoolTargets(), qualification_inflight_target=2
+        )
+    ) == 2
     await pipeline._fetch_once(sampler, work, db)
     await pipeline._fetch_once(sampler, work, db)
     await pipeline._describe_once(work, db, llm, config)
@@ -300,4 +306,8 @@ async def test_pipeline_fills_deficit_then_idles() -> None:
     assert len(db.inserted) == 2
     assert work.in_flight("king-1", P1) == 0
     # Inserts are now reflected, so the next poll's deficit is 0 → nothing launched.
-    assert work.sync_to_deficits(await db.pending_pool_deficits(PoolTargets())) == 0
+    assert work.sync_to_deficits(
+        await db.pending_pool_deficits(
+            PoolTargets(), qualification_inflight_target=2
+        )
+    ) == 0

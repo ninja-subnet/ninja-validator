@@ -85,6 +85,7 @@ async def _serve(config: GeneratorConfig, targets: PoolTargets) -> None:
             generator_model=config.generator_model,
             describe_concurrency=config.describe_concurrency,
             poll_seconds=config.poll_seconds,
+            qualification_inflight_target=config.qualification_inflight_target,
             llm_attempts=config.llm_attempts,
             llm_timeout=config.llm_timeout,
             use_dummy_llm=config.use_dummy_llm,
