@@ -343,11 +343,18 @@ against races even though it never holds locks across ticks.
   `INSERT challenges status = POOL_ONE (1)`.
 - **Advances / promotes / closes** by updating `challenges.status` to
   `POOL_TWO (2)` or `CLOSED (0)`, and appending a `duel_resolutions` row that
-  snapshots the tally, `best_of`, `win_margin`, and `outcome`.
+  snapshots the tally, scoring inputs, adjusted delta, and `outcome`.
+- **Token-efficiency mode** keeps raw quality authoritative outside a symmetric
+  `0.05` band. Inside the band it blends `70%` quality with `30%` relative
+  cumulative token efficiency, averaged over the full pool. Usage includes prompt
+  and completion tokens from every finalized model request. Low-quality rounds get
+  no efficiency modifier; a side with incomplete request accounting receives the
+  worst capped per-task efficiency value.
 - **Crowns** a new king on a POOL_TWO win by inserting into `kings`
   (`ON CONFLICT DO NOTHING`).
-- Config: `TAU_DUEL_WIN_MARGIN` (default `0`), `TAU_DUEL_POLL_SECONDS`
-  (default `5`).
+- Config: `TAU_DUEL_SCORING_METHOD`, `TAU_DUEL_ROUND_WIN_MARGIN`,
+  `TAU_DUEL_MEAN_SCORE_MARGIN`, `TAU_DUEL_TOKEN_*`, and
+  `TAU_DUEL_POLL_SECONDS`.
 
 ---
 
@@ -661,7 +668,12 @@ authoritative, commented list). Grouped by concern:
 |-----|---------|--------|
 | `TAU_POOL_ONE_TARGET` | `50` | Tasks to maintain in pool 1 for the king. |
 | `TAU_POOL_TWO_TARGET` | `50` | Tasks to maintain in pool 2 for the king. |
-| `TAU_DUEL_WIN_MARGIN` | `0` | Extra margin in the win rule `wins > losses + margin`. |
+| `TAU_DUEL_SCORING_METHOD` | `round_wins` code fallback; `token_efficiency` in `.env.example` | Pool decision rule. |
+| `TAU_DUEL_ROUND_WIN_MARGIN` | `0` | Extra margin in the round-win rule. |
+| `TAU_DUEL_MEAN_SCORE_MARGIN` | `0.05` | Mean-mode threshold; token mode's symmetric near-equal quality band. |
+| `TAU_DUEL_TOKEN_WEIGHT` | `0.30` | Efficiency share inside the near-equal band; quality gets `1 - weight`. |
+| `TAU_DUEL_TOKEN_QUALITY_FLOOR` | `0.70` | Both task scores must clear this before token efficiency applies. |
+| `TAU_DUEL_TOKEN_EFFICIENCY_CLIP` | `0.50` | Absolute cap on one task's relative token-efficiency delta. |
 | `TAU_DUEL_POLL_SECONDS` | `5` | duel-resolver poll interval. |
 
 ### task-solver & proxy

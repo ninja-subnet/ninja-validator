@@ -36,6 +36,9 @@ def _active(
     challenger_score_mean: float = 0.0,
     score_mean_delta: float = 0.0,
     score_mean_rounds: int = 0,
+    token_efficiency_mean: float = 0.0,
+    token_usage_rounds: int = 0,
+    token_usage_penalty_rounds: int = 0,
     target: int = 50,
     registered: bool = True,
 ) -> ActiveChallenge:
@@ -52,6 +55,9 @@ def _active(
             challenger_score_mean=challenger_score_mean,
             score_mean_delta=score_mean_delta,
             score_mean_rounds=score_mean_rounds,
+            token_efficiency_mean=token_efficiency_mean,
+            token_usage_rounds=token_usage_rounds,
+            token_usage_penalty_rounds=token_usage_penalty_rounds,
         ),
         challenger_registered=registered,
     )
@@ -97,14 +103,18 @@ def test_tally_judged_and_remaining() -> None:
     assert Tally(2, 3, 1).judged == 6
     assert Tally(2, 3, 1, score_mean_rounds=4).judged == 6
     assert _active(wins=10, losses=5, ties=5, target=50).remaining == 30
-    assert _active(wins=30, losses=30, target=50).remaining == 0  # over-count floors at 0
+    assert (
+        _active(wins=30, losses=30, target=50).remaining == 0
+    )  # over-count floors at 0
 
 
 # -- decide: king presence / opening ------------------------------------------------
 
 
 def test_no_king_waits_even_with_a_challenger_queued() -> None:
-    assert decide(_snapshot(king=None, next_challenger="chal")) == Nothing(WaitReason.NO_KING)
+    assert decide(_snapshot(king=None, next_challenger="chal")) == Nothing(
+        WaitReason.NO_KING
+    )
 
 
 def test_king_no_challenge_no_challenger_waits() -> None:
@@ -134,7 +144,9 @@ def test_pool_two_unbeatable_promotes() -> None:
 
 def test_cannot_catch_closes_king_defended() -> None:
     active = _active(P1, wins=0, losses=26, target=50)
-    assert decide(_snapshot(active)) == CloseChallenge(active, CloseReason.KING_DEFENDED)
+    assert decide(_snapshot(active)) == CloseChallenge(
+        active, CloseReason.KING_DEFENDED
+    )
 
 
 def test_one_nil_does_not_decide_prematurely() -> None:
@@ -153,13 +165,17 @@ def test_final_win_in_pool_one_advances() -> None:
 
 def test_final_tie_on_tally_king_holds() -> None:
     active = _active(P1, wins=1, losses=1, target=2)
-    assert decide(_snapshot(active)) == CloseChallenge(active, CloseReason.KING_DEFENDED)
+    assert decide(_snapshot(active)) == CloseChallenge(
+        active, CloseReason.KING_DEFENDED
+    )
 
 
 def test_all_ties_king_holds() -> None:
     # Failure-ties fill the pool but never help the challenger.
     active = _active(P1, wins=0, losses=0, ties=2, target=2)
-    assert decide(_snapshot(active)) == CloseChallenge(active, CloseReason.KING_DEFENDED)
+    assert decide(_snapshot(active)) == CloseChallenge(
+        active, CloseReason.KING_DEFENDED
+    )
 
 
 # -- decide: deregistration short-circuit -------------------------------------------
@@ -279,6 +295,85 @@ def test_mean_scoring_default_margin_is_005() -> None:
 
 def test_mean_scoring_king_holds_without_scored_rounds() -> None:
     active = _active(P1, wins=0, losses=0, ties=2, target=2)
-    assert decide(_snapshot(active), scoring_method=DuelScoringMethod.MEAN) == CloseChallenge(
-        active, CloseReason.KING_DEFENDED
+    assert decide(
+        _snapshot(active), scoring_method=DuelScoringMethod.MEAN
+    ) == CloseChallenge(active, CloseReason.KING_DEFENDED)
+
+
+# -- decide: token-efficiency mode -------------------------------------------------
+
+
+def test_token_scoring_waits_for_the_full_pool() -> None:
+    active = _active(
+        target=2,
+        ties=1,
+        score_mean_delta=0.0,
+        score_mean_rounds=1,
+        token_efficiency_mean=0.5,
     )
+    assert decide(
+        _snapshot(active), scoring_method=DuelScoringMethod.TOKEN_EFFICIENCY
+    ) == Nothing(WaitReason.DUEL_IN_PROGRESS)
+
+
+def test_token_scoring_uses_quality_outside_the_near_equal_band() -> None:
+    active = _active(
+        target=2,
+        ties=2,
+        score_mean_delta=-0.06,
+        score_mean_rounds=2,
+        token_efficiency_mean=0.5,
+    )
+    assert decide(
+        _snapshot(active),
+        scoring_method=DuelScoringMethod.TOKEN_EFFICIENCY,
+        mean_score_margin=0.05,
+        token_weight=0.30,
+    ) == CloseChallenge(active, CloseReason.KING_DEFENDED)
+
+
+def test_token_scoring_can_advance_a_near_equal_efficient_challenger() -> None:
+    active = _active(
+        target=2,
+        ties=2,
+        score_mean_delta=-0.05,
+        score_mean_rounds=2,
+        token_efficiency_mean=0.23,
+        token_usage_rounds=2,
+    )
+    assert decide(
+        _snapshot(active),
+        scoring_method=DuelScoringMethod.TOKEN_EFFICIENCY,
+        mean_score_margin=0.05,
+        token_weight=0.30,
+    ) == AdvancePool(active)
+
+
+def test_token_scoring_king_holds_when_composite_is_tied() -> None:
+    active = _active(
+        target=2,
+        ties=2,
+        score_mean_delta=0.0,
+        score_mean_rounds=2,
+        token_efficiency_mean=0.0,
+        token_usage_rounds=2,
+    )
+    assert decide(
+        _snapshot(active),
+        scoring_method=DuelScoringMethod.TOKEN_EFFICIENCY,
+    ) == CloseChallenge(active, CloseReason.KING_DEFENDED)
+
+
+def test_token_scoring_promotes_a_near_equal_pool_two_challenger() -> None:
+    active = _active(
+        P2,
+        target=2,
+        ties=2,
+        score_mean_delta=0.01,
+        score_mean_rounds=2,
+        token_efficiency_mean=0.10,
+        token_usage_rounds=2,
+    )
+    assert decide(
+        _snapshot(active), scoring_method=DuelScoringMethod.TOKEN_EFFICIENCY
+    ) == Promote(active)

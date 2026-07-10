@@ -210,6 +210,13 @@ class DuelResolution(Base):
     challenger_score_mean: Mapped[float] = mapped_column(Float, nullable=False)
     score_mean_delta: Mapped[float] = mapped_column(Float, nullable=False)
     score_mean_rounds: Mapped[int] = mapped_column(Integer, nullable=False)
+    token_weight: Mapped[float] = mapped_column(Float, nullable=False)
+    token_quality_floor: Mapped[float] = mapped_column(Float, nullable=False)
+    token_efficiency_clip: Mapped[float] = mapped_column(Float, nullable=False)
+    token_efficiency_mean: Mapped[float] = mapped_column(Float, nullable=False)
+    token_usage_rounds: Mapped[int] = mapped_column(Integer, nullable=False)
+    token_usage_penalty_rounds: Mapped[int] = mapped_column(Integer, nullable=False)
+    adjusted_score_delta: Mapped[float] = mapped_column(Float, nullable=False)
     # When the verdict was reached (UTC); inserting the row is the decision moment.
     created_at: Mapped[dt.datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
@@ -228,8 +235,20 @@ class DuelResolution(Base):
             name="ck_duel_resolutions_outcome",
         ),
         CheckConstraint(
-            "scoring_method IN ('round_wins', 'mean')",
+            "scoring_method IN ('round_wins', 'mean', 'token_efficiency')",
             name="ck_duel_resolutions_scoring_method",
+        ),
+        CheckConstraint(
+            "token_weight >= 0 AND token_weight <= 1",
+            name="ck_duel_resolutions_token_weight",
+        ),
+        CheckConstraint(
+            "token_quality_floor >= 0 AND token_quality_floor <= 1",
+            name="ck_duel_resolutions_token_quality_floor",
+        ),
+        CheckConstraint(
+            "token_efficiency_clip > 0 AND token_efficiency_clip <= 1",
+            name="ck_duel_resolutions_token_efficiency_clip",
         ),
     )
 

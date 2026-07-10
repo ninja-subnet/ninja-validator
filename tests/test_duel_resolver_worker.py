@@ -57,9 +57,7 @@ class FakeDb(DuelResolverDb):
         self.applied = applied
         self.calls: list[tuple[object, ...]] = []
 
-    async def open_challenge(
-        self, king_id: str, challenger_submission_id: str
-    ) -> bool:
+    async def open_challenge(self, king_id: str, challenger_submission_id: str) -> bool:
         self.calls.append(("open", (king_id, challenger_submission_id)))
         return self.applied
 
@@ -70,9 +68,21 @@ class FakeDb(DuelResolverDb):
         scoring_method: DuelScoringMethod,
         round_win_margin: int,
         mean_score_margin: float,
+        token_weight: float,
+        token_quality_floor: float,
+        token_efficiency_clip: float,
     ) -> bool:
         self.calls.append(
-            ("advance", challenge, scoring_method, round_win_margin, mean_score_margin)
+            (
+                "advance",
+                challenge,
+                scoring_method,
+                round_win_margin,
+                mean_score_margin,
+                token_weight,
+                token_quality_floor,
+                token_efficiency_clip,
+            )
         )
         return self.applied
 
@@ -84,9 +94,22 @@ class FakeDb(DuelResolverDb):
         scoring_method: DuelScoringMethod,
         round_win_margin: int,
         mean_score_margin: float,
+        token_weight: float,
+        token_quality_floor: float,
+        token_efficiency_clip: float,
     ) -> bool:
         self.calls.append(
-            ("close", challenge, outcome, scoring_method, round_win_margin, mean_score_margin)
+            (
+                "close",
+                challenge,
+                outcome,
+                scoring_method,
+                round_win_margin,
+                mean_score_margin,
+                token_weight,
+                token_quality_floor,
+                token_efficiency_clip,
+            )
         )
         return self.applied
 
@@ -97,9 +120,21 @@ class FakeDb(DuelResolverDb):
         scoring_method: DuelScoringMethod,
         round_win_margin: int,
         mean_score_margin: float,
+        token_weight: float,
+        token_quality_floor: float,
+        token_efficiency_clip: float,
     ) -> bool:
         self.calls.append(
-            ("promote", challenge, scoring_method, round_win_margin, mean_score_margin)
+            (
+                "promote",
+                challenge,
+                scoring_method,
+                round_win_margin,
+                mean_score_margin,
+                token_weight,
+                token_quality_floor,
+                token_efficiency_clip,
+            )
         )
         return self.applied
 
@@ -133,12 +168,18 @@ def test_config_from_env_reads_overrides() -> None:
             "TAU_DUEL_SCORING_METHOD": "mean",
             "TAU_DUEL_ROUND_WIN_MARGIN": "2",
             "TAU_DUEL_MEAN_SCORE_MARGIN": "0.075",
+            "TAU_DUEL_TOKEN_WEIGHT": "0.30",
+            "TAU_DUEL_TOKEN_QUALITY_FLOOR": "0.70",
+            "TAU_DUEL_TOKEN_EFFICIENCY_CLIP": "0.40",
             "TAU_DUEL_POLL_SECONDS": "3.5",
         }
     )
     assert config.scoring_method is DuelScoringMethod.MEAN
     assert config.round_win_margin == 2
     assert config.mean_score_margin == 0.075
+    assert config.token_weight == 0.30
+    assert config.token_quality_floor == 0.70
+    assert config.token_efficiency_clip == 0.40
     assert config.poll_seconds == 3.5
 
 
@@ -152,6 +193,12 @@ def test_config_rejects_bad_values() -> None:
         DuelResolverConfig(round_win_margin=-1)
     with pytest.raises(ValueError):
         DuelResolverConfig(mean_score_margin=-0.01)
+    with pytest.raises(ValueError):
+        DuelResolverConfig(token_weight=1.01)
+    with pytest.raises(ValueError):
+        DuelResolverConfig(token_quality_floor=-0.01)
+    with pytest.raises(ValueError):
+        DuelResolverConfig(token_efficiency_clip=0)
     with pytest.raises(ValueError):
         DuelResolverConfig(scoring_method="nonsense")
     with pytest.raises(ValueError):
@@ -171,7 +218,18 @@ async def test_apply_advance_pool_forwards_resolution_config() -> None:
     db, challenge = FakeDb(), _ac(P1)
     config = DuelResolverConfig(round_win_margin=2, mean_score_margin=0.075)
     await _apply(db, AdvancePool(challenge), TickLog(), config=config)
-    assert db.calls == [("advance", challenge, DuelScoringMethod.ROUND_WINS, 2, 0.075)]
+    assert db.calls == [
+        (
+            "advance",
+            challenge,
+            DuelScoringMethod.ROUND_WINS,
+            2,
+            0.075,
+            0.30,
+            0.70,
+            0.50,
+        )
+    ]
 
 
 async def test_apply_resolution_event_logs_scoring_config_and_stats(
@@ -190,6 +248,9 @@ async def test_apply_resolution_event_logs_scoring_config_and_stats(
             challenger_score_mean=0.5,
             score_mean_delta=0.1,
             score_mean_rounds=3,
+            token_efficiency_mean=0.2,
+            token_usage_rounds=3,
+            token_usage_penalty_rounds=0,
         ),
     )
     config = DuelResolverConfig(
@@ -207,6 +268,9 @@ async def test_apply_resolution_event_logs_scoring_config_and_stats(
             "scoring_method": "mean",
             "round_win_margin": 2,
             "mean_score_margin": 0.075,
+            "token_weight": 0.3,
+            "token_quality_floor": 0.7,
+            "token_efficiency_clip": 0.5,
             "challenger_submission_id": "c",
             "king_submission_id": "k",
             "pool": "POOL_ONE",
@@ -218,6 +282,9 @@ async def test_apply_resolution_event_logs_scoring_config_and_stats(
             "challenger_score_mean": 0.5,
             "score_mean_delta": 0.1,
             "score_mean_rounds": 3,
+            "token_efficiency_mean": 0.2,
+            "token_usage_rounds": 3,
+            "token_usage_penalty_rounds": 0,
         }
     ]
 
@@ -226,7 +293,9 @@ async def test_apply_promote() -> None:
     db, challenge = FakeDb(), _ac(P2)
     config = DuelResolverConfig(scoring_method=DuelScoringMethod.MEAN)
     await _apply(db, Promote(challenge), TickLog(), config=config)
-    assert db.calls == [("promote", challenge, DuelScoringMethod.MEAN, 0, 0.05)]
+    assert db.calls == [
+        ("promote", challenge, DuelScoringMethod.MEAN, 0, 0.05, 0.3, 0.7, 0.5)
+    ]
 
 
 async def test_apply_promote_publishes_when_configured() -> None:
@@ -243,7 +312,16 @@ async def test_apply_promote_publishes_when_configured() -> None:
 
     assert publisher.calls == ["c"]
     assert db.calls == [
-        ("promote", challenge, DuelScoringMethod.ROUND_WINS, 0, 0.05)
+        (
+            "promote",
+            challenge,
+            DuelScoringMethod.ROUND_WINS,
+            0,
+            0.05,
+            0.3,
+            0.7,
+            0.5,
+        )
     ]
 
 
@@ -277,7 +355,17 @@ async def test_apply_close_challenge_maps_king_defended() -> None:
         config=DuelResolverConfig(),
     )
     assert db.calls == [
-        ("close", challenge, DuelOutcome.KING_WON, DuelScoringMethod.ROUND_WINS, 0, 0.05)
+        (
+            "close",
+            challenge,
+            DuelOutcome.KING_WON,
+            DuelScoringMethod.ROUND_WINS,
+            0,
+            0.05,
+            0.3,
+            0.7,
+            0.5,
+        )
     ]
 
 
@@ -297,13 +385,18 @@ async def test_apply_close_challenge_maps_deregistered() -> None:
             DuelScoringMethod.ROUND_WINS,
             0,
             0.05,
+            0.3,
+            0.7,
+            0.5,
         )
     ]
 
 
 async def test_apply_nothing_writes_nothing() -> None:
     db = FakeDb()
-    await _apply(db, Nothing(WaitReason.NO_KING), TickLog(), config=DuelResolverConfig())
+    await _apply(
+        db, Nothing(WaitReason.NO_KING), TickLog(), config=DuelResolverConfig()
+    )
     assert db.calls == []
 
 

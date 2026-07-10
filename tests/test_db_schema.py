@@ -8,6 +8,7 @@ from tau.db import ChallengeStatus, GeneratorDb, PoolType, SubmissionStatus, Tas
 from tau.db.solver import _duel_side_order
 from tau.db.models import (
     Challenge,
+    DuelResolution,
     DuelTaskSolution,
     Judgement,
     King,
@@ -26,6 +27,26 @@ def test_task_status_values_are_stable() -> None:
         2,
     )
     assert TaskStatus.PENDING_SCREEN == 3
+
+
+def test_duel_resolution_has_token_efficiency_audit_columns() -> None:
+    columns = DuelResolution.__table__.columns
+    for name in (
+        "token_weight",
+        "token_quality_floor",
+        "token_efficiency_clip",
+        "token_efficiency_mean",
+        "token_usage_rounds",
+        "token_usage_penalty_rounds",
+        "adjusted_score_delta",
+    ):
+        assert columns[name].nullable is False
+    checks = {
+        constraint.name: str(constraint.sqltext)
+        for constraint in DuelResolution.__table__.constraints
+        if isinstance(constraint, CheckConstraint)
+    }
+    assert "token_efficiency" in checks["ck_duel_resolutions_scoring_method"]
 
 
 def test_submission_status_values_are_stable() -> None:

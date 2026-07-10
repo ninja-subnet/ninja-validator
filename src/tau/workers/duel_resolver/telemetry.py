@@ -107,6 +107,9 @@ def _challenge_fields(challenge: ActiveChallenge) -> dict[str, object]:
         "challenger_score_mean": challenge.tally.challenger_score_mean,
         "score_mean_delta": challenge.tally.score_mean_delta,
         "score_mean_rounds": challenge.tally.score_mean_rounds,
+        "token_efficiency_mean": challenge.tally.token_efficiency_mean,
+        "token_usage_rounds": challenge.tally.token_usage_rounds,
+        "token_usage_penalty_rounds": challenge.tally.token_usage_penalty_rounds,
     }
 
 
@@ -116,4 +119,7 @@ def _config_fields(config: DuelResolverConfig) -> dict[str, object]:
         "scoring_method": config.scoring_method.value,
         "round_win_margin": config.round_win_margin,
         "mean_score_margin": config.mean_score_margin,
+        "token_weight": config.token_weight,
+        "token_quality_floor": config.token_quality_floor,
+        "token_efficiency_clip": config.token_efficiency_clip,
     }

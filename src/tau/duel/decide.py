@@ -17,9 +17,15 @@ from .actions import (
 from .predicates import (
     challenger_cannot_catch,
     challenger_is_unbeatable,
+    challenger_wins_by_token_efficiency,
     challenger_wins_by_mean_score,
 )
-from .scoring import DEFAULT_MEAN_SCORE_MARGIN, DuelScoringMethod
+from .scoring import (
+    DEFAULT_MEAN_SCORE_MARGIN,
+    DEFAULT_TOKEN_WEIGHT,
+    DuelScoringMethod,
+    token_adjusted_score_delta,
+)
 from .snapshot import ActiveChallenge, ChallengeSnapshot
 
 _POOL_ONE = 1
@@ -31,6 +37,7 @@ def decide(
     scoring_method: DuelScoringMethod = DuelScoringMethod.ROUND_WINS,
     round_win_margin: int = 0,
     mean_score_margin: float = DEFAULT_MEAN_SCORE_MARGIN,
+    token_weight: float = DEFAULT_TOKEN_WEIGHT,
 ) -> Action:
     """Map *snapshot* to the one action due this tick, cheapest states first."""
     if snapshot.reigning_king_submission_id is None:
@@ -55,6 +62,12 @@ def decide(
             return decide_with_round_wins_scoring_method(active, round_win_margin)
         case DuelScoringMethod.MEAN:
             return decide_with_mean_scoring_method(active, mean_score_margin)
+        case DuelScoringMethod.TOKEN_EFFICIENCY:
+            return decide_with_token_efficiency_scoring_method(
+                active,
+                quality_band=mean_score_margin,
+                token_weight=token_weight,
+            )
         case _:
             assert_never(scoring_method)
 
@@ -94,4 +107,31 @@ def decide_with_mean_scoring_method(
     if int(active.pool) == _POOL_ONE:
         return AdvancePool(active)
 
+    return Promote(active)
+
+
+def decide_with_token_efficiency_scoring_method(
+    active: ActiveChallenge,
+    *,
+    quality_band: float,
+    token_weight: float,
+) -> Action:
+    """Resolve a full pool with quality authoritative outside the near-equal band."""
+    tally = active.tally
+    if active.remaining > 0:
+        return Nothing(WaitReason.DUEL_IN_PROGRESS)
+
+    adjusted_delta = token_adjusted_score_delta(
+        score_mean_delta=tally.score_mean_delta,
+        token_efficiency_mean=tally.token_efficiency_mean,
+        quality_band=quality_band,
+        token_weight=token_weight,
+    )
+    if not challenger_wins_by_token_efficiency(
+        adjusted_score_delta=adjusted_delta,
+        score_mean_rounds=tally.score_mean_rounds,
+    ):
+        return CloseChallenge(active, CloseReason.KING_DEFENDED)
+    if int(active.pool) == _POOL_ONE:
+        return AdvancePool(active)
     return Promote(active)

@@ -26,6 +26,7 @@ from tau.db.models import (
     Base,
     Challenge,
     DuelResolution,
+    DuelTaskSolution,
     Judgement,
     King,
     Registration,
@@ -50,6 +51,9 @@ _ROUND_RULE = {
     "scoring_method": DuelScoringMethod.ROUND_WINS,
     "round_win_margin": 0,
     "mean_score_margin": 0.05,
+    "token_weight": 0.30,
+    "token_quality_floor": 0.70,
+    "token_efficiency_clip": 0.50,
 }
 
 
@@ -164,7 +168,45 @@ def _task_with_solutions(
         )
     )
     session.add(TaskSolution(task_id=task_id, submission_id=king, solution="ksol"))
-    session.add(TaskSolution(task_id=task_id, submission_id=challenger, solution="csol"))
+    session.add(
+        TaskSolution(task_id=task_id, submission_id=challenger, solution="csol")
+    )
+
+
+def _duel_solution(
+    session,
+    *,
+    task_id: str,
+    challenge: str,
+    submission: str,
+    total_tokens: int,
+    finalized: bool = True,
+) -> None:
+    requests = [
+        {
+            "index": 0,
+            "prompt_tokens": total_tokens - 1,
+            "completion_tokens": 1,
+            "total_tokens": total_tokens,
+        }
+    ]
+    session.add(
+        DuelTaskSolution(
+            task_id=task_id,
+            challenger_submission_id=challenge,
+            submission_id=submission,
+            solution="patch",
+            duration=1.0,
+            exit_reason="completed",
+            usage_summary={
+                "request_count": 1 if finalized else 2,
+                "prompt_tokens": total_tokens - 1,
+                "completion_tokens": 1,
+                "total_tokens": total_tokens,
+                "requests": requests,
+            },
+        )
+    )
 
 
 def _ac(
@@ -295,10 +337,14 @@ async def test_snapshot_reports_active_challenge_tally(db: DuelResolverDb) -> No
             ("t5", PoolType.POOL_TWO, "challenger"),
         ]
         for task_id, pool, _winner in rounds:
-            _task_with_solutions(session, task_id=task_id, king="k", challenger="c", pool=pool)
+            _task_with_solutions(
+                session, task_id=task_id, king="k", challenger="c", pool=pool
+            )
         await session.flush()  # solutions must exist before their judgements
         for task_id, _pool, winner in rounds:
-            _judgement(session, task_id=task_id, king="k", challenger="c", winner=winner)
+            _judgement(
+                session, task_id=task_id, king="k", challenger="c", winner=winner
+            )
 
     snap = await db.snapshot(targets)
     active = snap.active_challenge
@@ -319,6 +365,85 @@ async def test_snapshot_reports_active_challenge_tally(db: DuelResolverDb) -> No
     assert active.challenger_registered is True
     # decide ignores it while a duel runs, so the seam skips computing it.
     assert snap.next_challenger_submission_id is None
+
+
+async def test_snapshot_reports_cumulative_token_efficiency_and_incomplete_penalty(
+    db: DuelResolverDb,
+) -> None:
+    targets = PoolTargets(pool_one=4, pool_two=4)
+    async with async_session_scope(db._sessions) as session:  # noqa: SLF001
+        _submission(session, "k", hotkey="hk-k", block=1)
+        _submission(session, "c", hotkey="hk-c", block=2)
+        session.add(King(king_id="k"))
+        _registration(session, uid=0, hotkey="hk-k", block=1)
+        _registration(session, uid=1, hotkey="hk-c", block=2)
+        session.add(
+            Challenge(
+                challenger_submission_id="c",
+                king_id="k",
+                status=int(ChallengeStatus.POOL_ONE),
+            )
+        )
+        for task_id in ("t1", "t2", "t3", "t4"):
+            _task_with_solutions(
+                session,
+                task_id=task_id,
+                king="k",
+                challenger="c",
+                pool=PoolType.POOL_ONE,
+            )
+        await session.flush()
+
+        # +0.2 challenger efficiency, -0.2 challenger efficiency, a low-quality
+        # zeroed round, then a missing challenger request penalized at -0.5.
+        usage = {
+            "t1": (150, 100, True, 0.8, 0.8),
+            "t2": (100, 150, True, 0.8, 0.8),
+            "t3": (200, 100, True, 0.6, 0.8),
+            "t4": (100, 100, False, 0.8, 0.8),
+        }
+        for task_id, (
+            king_tokens,
+            challenger_tokens,
+            finalized,
+            king_score,
+            chal_score,
+        ) in usage.items():
+            _duel_solution(
+                session,
+                task_id=task_id,
+                challenge="c",
+                submission="k",
+                total_tokens=king_tokens,
+            )
+            _duel_solution(
+                session,
+                task_id=task_id,
+                challenge="c",
+                submission="c",
+                total_tokens=challenger_tokens,
+                finalized=finalized,
+            )
+            _judgement(
+                session,
+                task_id=task_id,
+                king="k",
+                challenger="c",
+                winner="tie",
+                king_score=king_score,
+                challenger_score=chal_score,
+            )
+
+    snap = await db.snapshot(
+        targets,
+        token_quality_floor=0.7,
+        token_efficiency_clip=0.5,
+    )
+    assert snap.active_challenge is not None
+    tally = snap.active_challenge.tally
+    assert tally.token_efficiency_mean == pytest.approx(-0.125)
+    assert tally.token_usage_rounds == 3
+    assert tally.token_usage_penalty_rounds == 1
 
 
 async def test_snapshot_marks_a_deregistered_challenger(db: DuelResolverDb) -> None:
@@ -388,7 +513,9 @@ async def _challenge_status(db: DuelResolverDb) -> int | None:
         return None if challenge is None else challenge.status
 
 
-async def _resolutions(db: DuelResolverDb, challenger: str = "c") -> list[DuelResolution]:
+async def _resolutions(
+    db: DuelResolverDb, challenger: str = "c"
+) -> list[DuelResolution]:
     async with async_session_scope(db._sessions) as session:  # noqa: SLF001
         rows = await session.scalars(
             select(DuelResolution)
@@ -418,41 +545,67 @@ async def test_advance_pool_records_the_win_and_is_guarded(db: DuelResolverDb) -
             3,
             1,
             0,
-            king_score_mean=0.25,
-            challenger_score_mean=0.75,
-            score_mean_delta=0.5,
+            king_score_mean=0.72,
+            challenger_score_mean=0.76,
+            score_mean_delta=0.04,
             score_mean_rounds=4,
+            token_efficiency_mean=0.2,
+            token_usage_rounds=4,
+            token_usage_penalty_rounds=1,
         ),
         pool_target=5,
     )
-    assert await db.advance_pool(
-        challenge,
-        scoring_method=DuelScoringMethod.ROUND_WINS,
-        round_win_margin=2,
-        mean_score_margin=0.05,
-    ) is True
+    assert (
+        await db.advance_pool(
+            challenge,
+            scoring_method=DuelScoringMethod.TOKEN_EFFICIENCY,
+            round_win_margin=2,
+            mean_score_margin=0.05,
+            token_weight=0.30,
+            token_quality_floor=0.70,
+            token_efficiency_clip=0.50,
+        )
+        is True
+    )
     assert await _challenge_status(db) == int(ChallengeStatus.POOL_TWO)
     rows = await _resolutions(db)
     assert len(rows) == 1
     assert rows[0].pool_type == int(PoolType.POOL_ONE)
     assert rows[0].outcome == int(DuelOutcome.CHALLENGER_WON)
-    assert (rows[0].challenger_wins, rows[0].challenger_losses, rows[0].ties) == (3, 1, 0)
+    assert (rows[0].challenger_wins, rows[0].challenger_losses, rows[0].ties) == (
+        3,
+        1,
+        0,
+    )
     assert rows[0].best_of == 5
-    assert rows[0].scoring_method == "round_wins"
+    assert rows[0].scoring_method == "token_efficiency"
     assert rows[0].round_win_margin == 2
     assert rows[0].mean_score_margin == 0.05
-    assert rows[0].king_score_mean == 0.25
-    assert rows[0].challenger_score_mean == 0.75
-    assert rows[0].score_mean_delta == 0.5
+    assert rows[0].king_score_mean == 0.72
+    assert rows[0].challenger_score_mean == 0.76
+    assert rows[0].score_mean_delta == 0.04
     assert rows[0].score_mean_rounds == 4
+    assert rows[0].token_weight == 0.30
+    assert rows[0].token_quality_floor == 0.70
+    assert rows[0].token_efficiency_clip == 0.50
+    assert rows[0].token_efficiency_mean == 0.2
+    assert rows[0].token_usage_rounds == 4
+    assert rows[0].token_usage_penalty_rounds == 1
+    assert rows[0].adjusted_score_delta == pytest.approx(0.088)
     # Stale retry (still expecting POOL_ONE) is a no-op now that it is POOL_TWO,
     # and records nothing more.
-    assert await db.advance_pool(
-        challenge,
-        scoring_method=DuelScoringMethod.ROUND_WINS,
-        round_win_margin=2,
-        mean_score_margin=0.05,
-    ) is False
+    assert (
+        await db.advance_pool(
+            challenge,
+            scoring_method=DuelScoringMethod.TOKEN_EFFICIENCY,
+            round_win_margin=2,
+            mean_score_margin=0.05,
+            token_weight=0.30,
+            token_quality_floor=0.70,
+            token_efficiency_clip=0.50,
+        )
+        is False
+    )
     assert len(await _resolutions(db)) == 1
 
 
@@ -462,19 +615,29 @@ async def test_close_challenge_sets_closed_and_records_outcome(
     await _seed_king_and_challenger(db)
     await db.open_challenge("k", "c")
     challenge = _ac("c", "k", PoolType.POOL_ONE, tally=Tally(0, 3, 1), pool_target=4)
-    assert await db.close_challenge(
-        challenge,
-        DuelOutcome.KING_WON,
-        scoring_method=DuelScoringMethod.MEAN,
-        round_win_margin=1,
-        mean_score_margin=0.075,
-    ) is True
+    assert (
+        await db.close_challenge(
+            challenge,
+            DuelOutcome.KING_WON,
+            scoring_method=DuelScoringMethod.MEAN,
+            round_win_margin=1,
+            mean_score_margin=0.075,
+            token_weight=0.30,
+            token_quality_floor=0.70,
+            token_efficiency_clip=0.50,
+        )
+        is True
+    )
     assert await _challenge_status(db) == int(ChallengeStatus.CLOSED)
     rows = await _resolutions(db)
     assert len(rows) == 1
     assert rows[0].pool_type == int(PoolType.POOL_ONE)
     assert rows[0].outcome == int(DuelOutcome.KING_WON)
-    assert (rows[0].challenger_wins, rows[0].challenger_losses, rows[0].ties) == (0, 3, 1)
+    assert (rows[0].challenger_wins, rows[0].challenger_losses, rows[0].ties) == (
+        0,
+        3,
+        1,
+    )
     assert rows[0].best_of == 4
     assert rows[0].scoring_method == "mean"
     assert rows[0].round_win_margin == 1

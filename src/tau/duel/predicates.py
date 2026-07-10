@@ -15,6 +15,13 @@ def challenger_wins_by_mean_score(
     return score_mean_rounds > 0 and score_mean_delta >= margin
 
 
+def challenger_wins_by_token_efficiency(
+    *, adjusted_score_delta: float, score_mean_rounds: int
+) -> bool:
+    """True when the completed pool's quality/efficiency blend favors challenger."""
+    return score_mean_rounds > 0 and adjusted_score_delta > 0.0
+
+
 def challenger_is_unbeatable(
     wins: int, losses: int, remaining_rounds: int, margin: int
 ) -> bool:

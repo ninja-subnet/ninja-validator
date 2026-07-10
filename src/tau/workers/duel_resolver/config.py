@@ -7,7 +7,13 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
-from tau.duel import DEFAULT_MEAN_SCORE_MARGIN, DuelScoringMethod
+from tau.duel import (
+    DEFAULT_MEAN_SCORE_MARGIN,
+    DEFAULT_TOKEN_EFFICIENCY_CLIP,
+    DEFAULT_TOKEN_QUALITY_FLOOR,
+    DEFAULT_TOKEN_WEIGHT,
+    DuelScoringMethod,
+)
 from tau.utils.env import env_bool, env_float, env_int, env_str
 
 
@@ -17,7 +23,14 @@ class DuelResolverConfig:
     # Margin for round-win scoring (`wins > losses + margin`).
     round_win_margin: int = 0
     # Margin for mean-score scoring (`challenger_mean - king_mean >= margin`).
+    # Token-efficiency scoring reuses it as the symmetric near-equal quality band.
     mean_score_margin: float = DEFAULT_MEAN_SCORE_MARGIN
+    # Near-equal pools blend (1 - token_weight) quality with token_weight efficiency.
+    token_weight: float = DEFAULT_TOKEN_WEIGHT
+    # Token efficiency is zeroed for a round unless both quality scores clear this.
+    token_quality_floor: float = DEFAULT_TOKEN_QUALITY_FLOOR
+    # Absolute cap on one task's relative token-efficiency contribution.
+    token_efficiency_clip: float = DEFAULT_TOKEN_EFFICIENCY_CLIP
     # Idle sleep between poll ticks (seconds).
     poll_seconds: float = 5.0
     # Optional GitHub publication for promoted local submission bundles.
@@ -35,6 +48,12 @@ class DuelResolverConfig:
             raise ValueError("round_win_margin must be >= 0")
         if self.mean_score_margin < 0:
             raise ValueError("mean_score_margin must be >= 0")
+        if not 0 <= self.token_weight <= 1:
+            raise ValueError("token_weight must be between 0 and 1")
+        if not 0 <= self.token_quality_floor <= 1:
+            raise ValueError("token_quality_floor must be between 0 and 1")
+        if not 0 < self.token_efficiency_clip <= 1:
+            raise ValueError("token_efficiency_clip must be in (0, 1]")
         if self.poll_seconds <= 0:
             raise ValueError("poll_seconds must be positive")
         if not self.promotion_publish_branch.strip():
@@ -68,6 +87,13 @@ class DuelResolverConfig:
         mean_score_margin = env_float(
             env, "TAU_DUEL_MEAN_SCORE_MARGIN", d.mean_score_margin
         )
+        token_weight = env_float(env, "TAU_DUEL_TOKEN_WEIGHT", d.token_weight)
+        token_quality_floor = env_float(
+            env, "TAU_DUEL_TOKEN_QUALITY_FLOOR", d.token_quality_floor
+        )
+        token_efficiency_clip = env_float(
+            env, "TAU_DUEL_TOKEN_EFFICIENCY_CLIP", d.token_efficiency_clip
+        )
         poll_seconds = env_float(env, "TAU_DUEL_POLL_SECONDS", d.poll_seconds)
         publish_repo = env_str(
             env,
@@ -92,6 +118,9 @@ class DuelResolverConfig:
             scoring_method=scoring_method,
             round_win_margin=round_win_margin,
             mean_score_margin=mean_score_margin,
+            token_weight=token_weight,
+            token_quality_floor=token_quality_floor,
+            token_efficiency_clip=token_efficiency_clip,
             poll_seconds=poll_seconds,
             promotion_publish_repo=publish_repo or None,
             promotion_publish_branch=publish_branch,

@@ -20,6 +20,15 @@ class Tally:
     challenger_score_mean: float = 0.0
     score_mean_delta: float = 0.0
     score_mean_rounds: int = 0
+    # Mean challenger-perspective token efficiency across all scored rounds.
+    # Per-round values are positive when the challenger used fewer cumulative
+    # prompt+completion tokens and are clipped before averaging.
+    token_efficiency_mean: float = 0.0
+    # Both sides supplied finalized, positive cumulative usage for these rounds.
+    token_usage_rounds: int = 0
+    # Exactly one side supplied finalized usage, so the incomplete side received
+    # the configured worst per-round efficiency value.
+    token_usage_penalty_rounds: int = 0
 
     @property
     def judged(self) -> int:

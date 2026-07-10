@@ -2,15 +2,29 @@
 
 from __future__ import annotations
 
-from sqlalchemy import Subquery, func, select, update
+from sqlalchemy import (
+    BigInteger,
+    Float,
+    Subquery,
+    and_,
+    case,
+    cast,
+    func,
+    select,
+    update,
+)
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import aliased
 
 from tau.duel import (
     ActiveChallenge,
     ChallengeSnapshot,
+    DEFAULT_TOKEN_EFFICIENCY_CLIP,
+    DEFAULT_TOKEN_QUALITY_FLOOR,
     DuelScoringMethod,
     Tally,
+    token_adjusted_score_delta,
 )
 from tau.pools import PoolTargets
 
@@ -31,7 +45,13 @@ class DuelResolverDb:
     async def aclose(self) -> None:
         await self._engine.dispose()
 
-    async def snapshot(self, targets: PoolTargets) -> ChallengeSnapshot:
+    async def snapshot(
+        self,
+        targets: PoolTargets,
+        *,
+        token_quality_floor: float = DEFAULT_TOKEN_QUALITY_FLOOR,
+        token_efficiency_clip: float = DEFAULT_TOKEN_EFFICIENCY_CLIP,
+    ) -> ChallengeSnapshot:
         """Read the arena state `decide` needs, in one transaction.
 
         With no reigning king the snapshot is empty (the worker waits). The next
@@ -42,7 +62,13 @@ class DuelResolverDb:
             king_id = await self._reigning_king(session)
             if king_id is None:
                 return ChallengeSnapshot(None, None, None)
-            active = await self._active_challenge(session, king_id, targets)
+            active = await self._active_challenge(
+                session,
+                king_id,
+                targets,
+                token_quality_floor=token_quality_floor,
+                token_efficiency_clip=token_efficiency_clip,
+            )
             next_challenger = (
                 None if active is not None else await self._next_challenger(session)
             )
@@ -76,6 +102,9 @@ class DuelResolverDb:
         scoring_method: DuelScoringMethod,
         round_win_margin: int,
         mean_score_margin: float,
+        token_weight: float,
+        token_quality_floor: float,
+        token_efficiency_clip: float,
     ) -> bool:
         """POOL_ONE -> POOL_TWO (challenger won pool 1), recording the verdict, only if
         still in the pool the snapshot observed."""
@@ -89,6 +118,9 @@ class DuelResolverDb:
                 scoring_method,
                 round_win_margin,
                 mean_score_margin,
+                token_weight,
+                token_quality_floor,
+                token_efficiency_clip,
             )
             return True
 
@@ -100,6 +132,9 @@ class DuelResolverDb:
         scoring_method: DuelScoringMethod,
         round_win_margin: int,
         mean_score_margin: float,
+        token_weight: float,
+        token_quality_floor: float,
+        token_efficiency_clip: float,
     ) -> bool:
         """Close the challenge (king holds or challenger left), recording *outcome*,
         only if still in the observed pool."""
@@ -113,6 +148,9 @@ class DuelResolverDb:
                 scoring_method,
                 round_win_margin,
                 mean_score_margin,
+                token_weight,
+                token_quality_floor,
+                token_efficiency_clip,
             )
             return True
 
@@ -123,6 +161,9 @@ class DuelResolverDb:
         scoring_method: DuelScoringMethod,
         round_win_margin: int,
         mean_score_margin: float,
+        token_weight: float,
+        token_quality_floor: float,
+        token_efficiency_clip: float,
     ) -> bool:
         """Crown the challenger and close the challenge (challenger won pool 2), in one
         transaction.
@@ -141,6 +182,9 @@ class DuelResolverDb:
                 scoring_method,
                 round_win_margin,
                 mean_score_margin,
+                token_weight,
+                token_quality_floor,
+                token_efficiency_clip,
             )
             await session.execute(
                 insert(models.King)
@@ -177,9 +221,20 @@ class DuelResolverDb:
         scoring_method: DuelScoringMethod,
         round_win_margin: int,
         mean_score_margin: float,
+        token_weight: float,
+        token_quality_floor: float,
+        token_efficiency_clip: float,
     ) -> None:
         """Append the pool's verdict to ``duel_resolutions`` with the tally and
         thresholds it was decided on. Idempotent: one row per (challenge, pool)."""
+        adjusted_score_delta = challenge.tally.score_mean_delta
+        if scoring_method is DuelScoringMethod.TOKEN_EFFICIENCY:
+            adjusted_score_delta = token_adjusted_score_delta(
+                score_mean_delta=challenge.tally.score_mean_delta,
+                token_efficiency_mean=challenge.tally.token_efficiency_mean,
+                quality_band=mean_score_margin,
+                token_weight=token_weight,
+            )
         await session.execute(
             insert(models.DuelResolution)
             .values(
@@ -197,6 +252,13 @@ class DuelResolverDb:
                 challenger_score_mean=challenge.tally.challenger_score_mean,
                 score_mean_delta=challenge.tally.score_mean_delta,
                 score_mean_rounds=challenge.tally.score_mean_rounds,
+                token_weight=token_weight,
+                token_quality_floor=token_quality_floor,
+                token_efficiency_clip=token_efficiency_clip,
+                token_efficiency_mean=challenge.tally.token_efficiency_mean,
+                token_usage_rounds=challenge.tally.token_usage_rounds,
+                token_usage_penalty_rounds=challenge.tally.token_usage_penalty_rounds,
+                adjusted_score_delta=adjusted_score_delta,
             )
             .on_conflict_do_nothing(
                 index_elements=["challenger_submission_id", "pool_type"]
@@ -211,7 +273,13 @@ class DuelResolverDb:
         return (await session.scalars(stmt)).first()
 
     async def _active_challenge(
-        self, session: AsyncSession, king_id: str, targets: PoolTargets
+        self,
+        session: AsyncSession,
+        king_id: str,
+        targets: PoolTargets,
+        *,
+        token_quality_floor: float,
+        token_efficiency_clip: float,
     ) -> ActiveChallenge | None:
         """The challenge dueling *king_id* (status POOL_ONE/POOL_TWO), or None.
 
@@ -239,14 +307,28 @@ class DuelResolverDb:
             king_submission_id=king_id,
             pool=pool,
             pool_target=targets.target(pool),
-            tally=await self._tally(session, king_id, challenger_id, pool),
+            tally=await self._tally(
+                session,
+                king_id,
+                challenger_id,
+                pool,
+                token_quality_floor=token_quality_floor,
+                token_efficiency_clip=token_efficiency_clip,
+            ),
             challenger_registered=await self._challenger_registered(
                 session, challenger_id
             ),
         )
 
     async def _tally(
-        self, session: AsyncSession, king_id: str, challenger_id: str, pool: PoolType
+        self,
+        session: AsyncSession,
+        king_id: str,
+        challenger_id: str,
+        pool: PoolType,
+        *,
+        token_quality_floor: float,
+        token_efficiency_clip: float,
     ) -> Tally:
         """Challenger-perspective outcomes and score means over the active pool."""
         conditions = (
@@ -264,20 +346,114 @@ class DuelResolverDb:
         counts = {
             winner: count for winner, count in (await session.execute(stmt)).all()
         }
+        king_solution = aliased(models.DuelTaskSolution)
+        challenger_solution = aliased(models.DuelTaskSolution)
+        king_tokens = cast(
+            king_solution.usage_summary["total_tokens"].astext, BigInteger
+        )
+        challenger_tokens = cast(
+            challenger_solution.usage_summary["total_tokens"].astext, BigInteger
+        )
+        king_usage_ok = case(
+            (
+                and_(
+                    king_solution.exit_reason == "completed",
+                    king_tokens > 0,
+                    cast(
+                        king_solution.usage_summary["request_count"].astext,
+                        BigInteger,
+                    )
+                    == func.jsonb_array_length(king_solution.usage_summary["requests"]),
+                ),
+                1,
+            ),
+            else_=0,
+        )
+        challenger_usage_ok = case(
+            (
+                and_(
+                    challenger_solution.exit_reason == "completed",
+                    challenger_tokens > 0,
+                    cast(
+                        challenger_solution.usage_summary["request_count"].astext,
+                        BigInteger,
+                    )
+                    == func.jsonb_array_length(
+                        challenger_solution.usage_summary["requests"]
+                    ),
+                ),
+                1,
+            ),
+            else_=0,
+        )
+        quality_ok = (
+            func.least(
+                models.Judgement.king_score,
+                models.Judgement.challenger_score,
+            )
+            >= token_quality_floor
+        )
+        both_usage_ok = and_(king_usage_ok == 1, challenger_usage_ok == 1)
+        one_usage_missing = (king_usage_ok + challenger_usage_ok) == 1
+        relative_efficiency = (king_tokens - challenger_tokens) / cast(
+            king_tokens + challenger_tokens, Float
+        )
+        clipped_efficiency = func.greatest(
+            -token_efficiency_clip,
+            func.least(token_efficiency_clip, relative_efficiency),
+        )
+        token_efficiency = case(
+            (and_(quality_ok, both_usage_ok), clipped_efficiency),
+            (
+                and_(quality_ok, king_usage_ok == 1, challenger_usage_ok == 0),
+                -token_efficiency_clip,
+            ),
+            (
+                and_(quality_ok, king_usage_ok == 0, challenger_usage_ok == 1),
+                token_efficiency_clip,
+            ),
+            else_=0.0,
+        )
         score_stmt = (
             select(
                 func.avg(models.Judgement.king_score),
                 func.avg(models.Judgement.challenger_score),
                 func.count(),
+                func.avg(token_efficiency),
+                func.sum(case((both_usage_ok, 1), else_=0)),
+                func.sum(case((and_(quality_ok, one_usage_missing), 1), else_=0)),
             )
             .join(models.Task, models.Task.task_id == models.Judgement.task_id)
+            .outerjoin(
+                king_solution,
+                and_(
+                    king_solution.task_id == models.Judgement.task_id,
+                    king_solution.challenger_submission_id == challenger_id,
+                    king_solution.submission_id == king_id,
+                ),
+            )
+            .outerjoin(
+                challenger_solution,
+                and_(
+                    challenger_solution.task_id == models.Judgement.task_id,
+                    challenger_solution.challenger_submission_id == challenger_id,
+                    challenger_solution.submission_id == challenger_id,
+                ),
+            )
             .where(
                 *conditions,
                 models.Judgement.king_score.is_not(None),
                 models.Judgement.challenger_score.is_not(None),
             )
         )
-        king_mean, challenger_mean, score_count = (await session.execute(score_stmt)).one()
+        (
+            king_mean,
+            challenger_mean,
+            score_count,
+            token_mean,
+            token_usage_count,
+            token_penalty_count,
+        ) = (await session.execute(score_stmt)).one()
         scored = int(score_count or 0)
         king_score_mean = float(king_mean) if scored else 0.0
         challenger_score_mean = float(challenger_mean) if scored else 0.0
@@ -295,6 +471,9 @@ class DuelResolverDb:
             challenger_score_mean=challenger_score_mean,
             score_mean_delta=challenger_score_mean - king_score_mean,
             score_mean_rounds=scored,
+            token_efficiency_mean=float(token_mean or 0.0),
+            token_usage_rounds=int(token_usage_count or 0),
+            token_usage_penalty_rounds=int(token_penalty_count or 0),
         )
 
     async def _challenger_registered(
