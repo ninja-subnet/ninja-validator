@@ -250,6 +250,30 @@ services:
         condition: service_completed_successfully
     restart: unless-stopped
 
+  # Public dashboard API for ninja66.ai. Nginx serves the static shell and proxies
+  # the live JSON routes here; archived duel artifacts remain immutable.
+  dashboard:
+    build:
+      context: .
+      dockerfile: deploy/worker/Dockerfile
+      args:
+        EXTRA: dashboard
+        WORKER: tau-dashboard-api
+    container_name: pg_stack_dashboard
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB}
+      TAU_DASHBOARD_HOST: 0.0.0.0
+      TAU_DASHBOARD_PORT: 8066
+    ports:
+      - "127.0.0.1:${TAU_DASHBOARD_HOST_PORT:-8066}:8066"
+    depends_on:
+      db:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    restart: unless-stopped
+
   # Sole setter of on-chain weights -- run exactly one (do not scale). Reads the king
   # window from the DB and submits set_weights once per epoch, near the boundary.
   weight-setter:
