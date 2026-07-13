@@ -24,7 +24,6 @@ host run the default temp dir works as-is.
 
 from __future__ import annotations
 
-import hashlib
 import json
 import logging
 import os
@@ -42,6 +41,7 @@ from docker.types import Ulimit
 
 from tau.axiom import get_axiom
 from tau.proxy import LLMProxy, SolveUsageSummary, UpstreamTarget
+from tau.utils.seeding import stable_seed
 
 from .config import SandboxConfig
 from .harness import (
@@ -72,8 +72,6 @@ from .types import (
 
 log = logging.getLogger(__name__)
 
-_TASK_SEED_BITS = 53
-_TASK_SEED_MASK = (1 << _TASK_SEED_BITS) - 1
 _VALIDATOR_TASK_SAMPLING_PARAMS: dict[str, float] = {"temperature": 0.0, "top_p": 1.0}
 _SORTDIR_PRELOAD = "/opt/tau/libsortdir.so"
 
@@ -220,8 +218,7 @@ def run_agent_in_container(
 
 
 def _task_seed(task_id: str) -> int:
-    digest = hashlib.sha256(task_id.encode("utf-8")).digest()
-    return int.from_bytes(digest[:8], "big") & _TASK_SEED_MASK
+    return stable_seed(task_id)
 
 
 def _task_sampling_params(task_id: str) -> dict[str, float | int]:

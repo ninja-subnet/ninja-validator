@@ -89,8 +89,11 @@ class DummyLLMClient(abc.ABC):
     async def aclose(self) -> None:
         return None
 
-    async def complete_text(self, prompt: RenderablePrompt) -> str:
+    async def complete_text(
+        self, prompt: RenderablePrompt, *, seed: int | None = None
+    ) -> str:
         """Sleep a modelled latency, then return a fabricated result (or garbage)."""
+        _ = seed
         await asyncio.sleep(self._next_latency())
         if self._rng.random() < self._config.failure_rate:
             return self._unusable_output()

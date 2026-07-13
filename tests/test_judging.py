@@ -20,10 +20,14 @@ class FakeClient:
         self.response = response
         self.model = model
         self.prompt: RenderablePrompt | None = None
+        self.seed: int | None = None
         self.calls = 0
 
-    async def complete_text(self, prompt: RenderablePrompt) -> str:
+    async def complete_text(
+        self, prompt: RenderablePrompt, *, seed: int | None = None
+    ) -> str:
         self.prompt = prompt
+        self.seed = seed
         self.calls += 1
         if isinstance(self.response, Exception):
             raise self.response
@@ -35,10 +39,14 @@ class HangingClient:
 
     def __init__(self) -> None:
         self.prompt: RenderablePrompt | None = None
+        self.seed: int | None = None
         self.calls = 0
 
-    async def complete_text(self, prompt: RenderablePrompt) -> str:
+    async def complete_text(
+        self, prompt: RenderablePrompt, *, seed: int | None = None
+    ) -> str:
         self.prompt = prompt
+        self.seed = seed
         self.calls += 1
         await asyncio.sleep(1)
         raise AssertionError("unreachable after timeout")
@@ -126,12 +134,13 @@ async def test_openrouter_client_sends_provider_routing() -> None:
             },
             client=http,
         )
-        await client.complete_text(TextPrompt("judge"))
+        await client.complete_text(TextPrompt("judge"), seed=12345)
 
     assert captured["payload"]["provider"] == {
         "only": ["z-ai/fp8"],
         "allow_fallbacks": False,
     }
+    assert captured["payload"]["seed"] == 12345
 
 
 def test_judge_blinds_prompt_and_stamps_client_model() -> None:
@@ -153,12 +162,61 @@ def test_judge_blinds_prompt_and_stamps_client_model() -> None:
         judge(task, king, challenger, client=client, seed="stable-test-seed")
     )
 
-    # the judge handed the client a prompt; it never threaded transport params
+    # The judge handed the client a prompt and a validator-owned model seed.
     assert client.prompt is not None
+    assert client.seed is not None
+    assert 0 <= client.seed < 2**53
     assert judgment.model == "test/model"
     assert judgment.king_score != judgment.challenger_score
     assert judgment.winner in {"king", "challenger"}
     assert judgment.error is None
+
+
+def test_judge_default_seed_is_content_based_not_submission_based() -> None:
+    response = json.dumps(
+        {
+            "winner": "tie",
+            "candidate_a_score": 50,
+            "candidate_b_score": 50,
+            "rationale": "same pair",
+        }
+    )
+    task = Task(task_id="task-1", problem_statement="Fix it", reference_patch="ref")
+    king = Solution(submission_id="king", patch="king patch")
+    challenger_a = Solution(submission_id="challenger-a", patch="challenger patch")
+    challenger_b = Solution(submission_id="challenger-b", patch="challenger patch")
+    first = FakeClient(response)
+    second = FakeClient(response)
+
+    asyncio.run(judge(task, king, challenger_a, client=first))
+    asyncio.run(judge(task, king, challenger_b, client=second))
+
+    assert first.seed == second.seed
+    assert first.prompt is not None
+    assert second.prompt is not None
+    assert first.prompt.as_text() == second.prompt.as_text()
+
+
+def test_judge_default_seed_changes_when_patch_content_changes() -> None:
+    response = json.dumps(
+        {
+            "winner": "tie",
+            "candidate_a_score": 50,
+            "candidate_b_score": 50,
+            "rationale": "same pair",
+        }
+    )
+    task = Task(task_id="task-1", problem_statement="Fix it", reference_patch="ref")
+    king = Solution(submission_id="king", patch="king patch")
+    challenger_a = Solution(submission_id="challenger", patch="challenger patch")
+    challenger_b = Solution(submission_id="challenger", patch="different patch")
+    first = FakeClient(response)
+    second = FakeClient(response)
+
+    asyncio.run(judge(task, king, challenger_a, client=first))
+    asyncio.run(judge(task, king, challenger_b, client=second))
+
+    assert first.seed != second.seed
 
 
 def test_worker_converts_exhausted_judge_failures_to_neutral() -> None:

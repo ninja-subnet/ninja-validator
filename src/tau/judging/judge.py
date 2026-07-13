@@ -1,6 +1,10 @@
 from __future__ import annotations
 
+import hashlib
+import json
+
 from tau.openrouter import LLMClient
+from tau.utils.seeding import stable_seed
 
 from .blinding import blind, unblind
 from .parsing import parse_verdict
@@ -29,13 +33,11 @@ async def judge(
     if guarded is not None:
         return guarded
 
-    blinded = blind(
-        seed or _default_seed(task, king_solution, challenger_solution),
-        king_solution.patch,
-        challenger_solution.patch,
-    )
+    seed_text = seed or _default_seed(task, king_solution, challenger_solution)
+    model_seed = stable_seed(seed_text)
+    blinded = blind(seed_text, king_solution.patch, challenger_solution.patch)
     prompt = build_prompt(task, blinded.candidate_a_patch, blinded.candidate_b_patch)
-    raw = await client.complete_text(prompt)
+    raw = await client.complete_text(prompt, seed=model_seed)
     verdict = parse_verdict(raw)
     result = unblind(blinded, verdict)
     return Judgment(
@@ -62,4 +64,19 @@ def _default_seed(
     king_solution: Solution,
     challenger_solution: Solution,
 ) -> str:
-    return f"{task.task_id}:{king_solution.submission_id}:{challenger_solution.submission_id}"
+    return json.dumps(
+        {
+            "kind": "tau-judge-v1",
+            "task_id": task.task_id,
+            "problem_statement_sha256": _sha256(task.problem_statement),
+            "reference_patch_sha256": _sha256(task.reference_patch),
+            "king_patch_sha256": _sha256(king_solution.patch),
+            "challenger_patch_sha256": _sha256(challenger_solution.patch),
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+
+
+def _sha256(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()

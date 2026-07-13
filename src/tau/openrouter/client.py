@@ -65,7 +65,9 @@ class LLMClient(Protocol):
 
     @property
     def model(self) -> str: ...
-    async def complete_text(self, prompt: RenderablePrompt) -> str: ...
+    async def complete_text(
+        self, prompt: RenderablePrompt, *, seed: int | None = None
+    ) -> str: ...
 
 
 class OpenRouterClient:
@@ -120,7 +122,9 @@ class OpenRouterClient:
         if self._owns_client:
             await self._client.aclose()
 
-    async def complete_text(self, prompt: RenderablePrompt) -> str:
+    async def complete_text(
+        self, prompt: RenderablePrompt, *, seed: int | None = None
+    ) -> str:
         content = (
             prompt.as_content()
             if _supports_structured(self._model)
@@ -140,6 +144,8 @@ class OpenRouterClient:
             payload["reasoning"] = self._reasoning
         if self._provider is not None:
             payload["provider"] = dict(self._provider)
+        if seed is not None:
+            payload["seed"] = seed
 
         headers = {
             "Authorization": f"Bearer {self._api_key}",
@@ -174,6 +180,7 @@ async def complete_text(
     max_tokens: int | None = None,
     reasoning: dict[str, Any] | None = None,
     provider: dict[str, Any] | None = None,
+    seed: int | None = None,
 ) -> str:
     """One-shot async completion (creates and closes its own client).
 
@@ -191,7 +198,7 @@ async def complete_text(
         provider=provider,
         timeout=timeout,
     ) as client:
-        return await client.complete_text(renderable)
+        return await client.complete_text(renderable, seed=seed)
 
 
 def normalize_base_url(raw: str | None) -> str:
