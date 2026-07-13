@@ -49,8 +49,9 @@ miner against a fixed benchmark, the validator runs a **continuous tournament**:
 3. Each task is only used once the **king's own agent produces a viable patch**
    and it passes through single-candidate screening. The default shadow mode
    records the score; enforce mode also filters tasks above the configured ceiling.
-4. A **challenger** (another eligible submission) is matched against the king.
-   Both agents solve the same qualified tasks in isolated sandboxes.
+4. Once both task pools have reached their qualified targets, a **challenger**
+   (another eligible submission) is matched against the king. Both agents solve
+   the same qualified tasks in isolated sandboxes.
 5. An LLM **judge** compares the two patches head-to-head, blinded to which is
    which.
 6. The **duel-resolver** tallies the verdicts. A challenger must clear two
@@ -533,6 +534,9 @@ docker compose logs migrate     # confirm "alembic upgrade head" succeeded
   **same path on host and in the container**. That same-path rule is mandatory:
   the sandbox's `/work` bind-mount is resolved by the *host* daemon, so the path
   must mean the same thing on both sides.
+- **duel-resolver promotion:** compose also mounts `TAU_SUBMISSIONS_DIR`
+  read-only into the singleton resolver so it can publish a promoted king's
+  bundle when `TAU_PROMOTION_PUBLISH_REPO` and a GitHub token are configured.
 - **Run a single worker on the host** (outside compose) for debugging:
   ```bash
   export DATABASE_URL="postgresql+psycopg://appuser:<pw>@localhost:5432/arena"
@@ -661,8 +665,14 @@ authoritative, commented list). Grouped by concern:
 |-----|---------|--------|
 | `TAU_POOL_ONE_TARGET` | `50` | Tasks to maintain in pool 1 for the king. |
 | `TAU_POOL_TWO_TARGET` | `50` | Tasks to maintain in pool 2 for the king. |
-| `TAU_DUEL_WIN_MARGIN` | `0` | Extra margin in the win rule `wins > losses + margin`. |
+| `TAU_DUEL_SCORING_METHOD` | `round_wins` code fallback; `mean` in `.env.example` | Resolve each completed pool by round wins or mean score. |
+| `TAU_DUEL_ROUND_WIN_MARGIN` | `0` | Extra margin in the rule `wins > losses + margin`. |
+| `TAU_DUEL_MEAN_SCORE_MARGIN` | `0.05` code fallback; `0.10` in `.env.example` | In mean mode, the challenger's mean score must exceed the king's by this amount. |
 | `TAU_DUEL_POLL_SECONDS` | `5` | duel-resolver poll interval. |
+| `TAU_PROMOTION_PUBLISH_REPO` | unset | Optional GitHub repository that receives a promoted king's bundle. |
+| `TAU_PROMOTION_PUBLISH_BRANCH` | `main` | Branch used for optional king publication. |
+| `TAU_PROMOTION_GITHUB_TOKEN` | legacy token fallback | Token used for optional king publication. |
+| `TAU_PROMOTION_PUBLISH_REQUIRED` | `false` | If true, do not crown the challenger unless publication succeeds. |
 
 ### task-solver & proxy
 
@@ -672,7 +682,7 @@ authoritative, commented list). Grouped by concern:
 | `MAX_CONTAINERS` | `4` code fallback; `100` in `.env.example` | Max concurrently running qualification and duel sandboxes. Size this to host and upstream capacity. |
 | `TAU_SOLVER_POLL_SECONDS` | `30` | Idle poll interval; while work is running, free slots are refilled about once per second. |
 | `TAU_SOLVER_QUALIFY_MIN_CHANGED_LINES` | `1` | Min diff lines the king must change before a task advances to screening. |
-| `TAU_SOLVER_REQUIRE_FULL_POOL_FOR_DUELS` | `false` code fallback; `true` in `.env.example` | Wait until the active pool has target QUALIFIED tasks before scheduling duel solves. |
+| `TAU_SOLVER_REQUIRE_FULL_POOL_FOR_DUELS` | `false` code fallback; `true` in `.env.example` | Additional active-pool safety gate before scheduling duel solves. New challenges always wait for both pools to reach their QUALIFIED targets. |
 | `TAU_SUBMISSIONS_DIR` | `submissions` | Host dir of extracted submissions (mounted read-only, same path). |
 | `TAU_SANDBOX_WORK_ROOT` | system temp | Host dir for per-solve work trees (**same path host↔container**). |
 | `SOLVER_MAX_REQUESTS` / `_TOTAL_TOKENS` / `_COST` / `_TOKENS_PER_REQUEST` | unbounded | Per-solve spend caps. **Strongly advised** — untrusted code drives the spend. |

@@ -167,6 +167,23 @@ def _task_with_solutions(
     session.add(TaskSolution(task_id=task_id, submission_id=challenger, solution="csol"))
 
 
+def _qualified_task(session, *, task_id: str, king: str, pool: PoolType) -> None:
+    session.add(
+        Task(
+            task_id=task_id,
+            king_id=king,
+            pool_type=int(pool),
+            problem_statement="p",
+            status_id=int(TaskStatus.QUALIFIED),
+            repo_clone_url="u",
+            parent_sha="p",
+            commit_sha="c",
+            reference_patch="r",
+            content_fingerprint=f"fp-{task_id}",
+        )
+    )
+
+
 def _ac(
     challenger: str,
     king: str,
@@ -237,6 +254,7 @@ async def test_snapshot_is_empty_without_a_king(db: DuelResolverDb) -> None:
 async def test_snapshot_opens_for_the_oldest_eligible_registered_submission(
     db: DuelResolverDb,
 ) -> None:
+    targets = PoolTargets(pool_one=1, pool_two=1)
     async with async_session_scope(db._sessions) as session:  # noqa: SLF001
         _submission(session, "k", hotkey="hk-k", block=1)
         session.add(King(king_id="k"))
@@ -263,11 +281,33 @@ async def test_snapshot_opens_for_the_oldest_eligible_registered_submission(
                 status=int(ChallengeStatus.CLOSED),
             )
         )
+        _qualified_task(session, task_id="p1", king="k", pool=PoolType.POOL_ONE)
+        _qualified_task(session, task_id="p2", king="k", pool=PoolType.POOL_TWO)
 
-    snap = await db.snapshot(PoolTargets())
+    snap = await db.snapshot(targets)
     assert snap.reigning_king_submission_id == "k"
     assert snap.active_challenge is None
     assert snap.next_challenger_submission_id == "c-old"
+    assert snap.task_pools_ready is True
+
+
+async def test_snapshot_hides_challenger_until_both_task_pools_are_ready(
+    db: DuelResolverDb,
+) -> None:
+    targets = PoolTargets(pool_one=1, pool_two=1)
+    async with async_session_scope(db._sessions) as session:  # noqa: SLF001
+        _submission(session, "k", hotkey="hk-k", block=1)
+        _submission(session, "c", hotkey="hk-c", block=2)
+        session.add(King(king_id="k"))
+        _registration(session, uid=0, hotkey="hk-k", block=1)
+        _registration(session, uid=1, hotkey="hk-c", block=2)
+        _qualified_task(session, task_id="p1", king="k", pool=PoolType.POOL_ONE)
+
+    snap = await db.snapshot(targets)
+
+    assert snap.active_challenge is None
+    assert snap.next_challenger_submission_id is None
+    assert snap.task_pools_ready is False
 
 
 async def test_snapshot_reports_active_challenge_tally(db: DuelResolverDb) -> None:

@@ -38,6 +38,8 @@ def decide(
 
     active = snapshot.active_challenge
     if active is None:
+        if not snapshot.task_pools_ready:
+            return Nothing(WaitReason.POOLS_NOT_READY)
         # A king with no active challenge: start one if a challenger is waiting.
         if snapshot.next_challenger_submission_id is None:
             return Nothing(WaitReason.NO_CHALLENGER)
