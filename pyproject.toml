@@ -23,6 +23,7 @@ migrate = ["alembic==1.16.1"]
 # (deploy/worker/Dockerfile) still needs a matching extra to resolve.
 bittensor = []
 judge = []
+dashboard = []
 task-screener = []
 task-generator = []
 duel-resolver = []
@@ -35,6 +36,7 @@ task-solver = []
 # image runs one of these via its WORKER build-arg. The modules land later.
 chain-watcher = "tau.workers.chain_watcher:main"
 judge-worker = "tau.workers.judge:main"
+tau-dashboard-api = "tau.dashboard.main:main"
 task-screener = "tau.workers.task_screener:main"
 task-generator = "tau.workers.task_generator:main"
 qualification-worker = "tau.workers.qualification:main"
