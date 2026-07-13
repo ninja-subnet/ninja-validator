@@ -20,6 +20,7 @@ class WaitReason(StrEnum):
     """Why nothing is due -- what the resolver is waiting on."""
 
     NO_KING = "no_king"  # no reigning king
+    NEW_CHALLENGES_PAUSED = "new_challenges_paused"  # operator-requested drain
     POOLS_NOT_READY = "pools_not_ready"  # both qualified task pools are not full
     NO_CHALLENGER = "no_challenger"  # no eligible challenger to open against
     DUEL_IN_PROGRESS = "duel_in_progress"  # active duel not yet decided

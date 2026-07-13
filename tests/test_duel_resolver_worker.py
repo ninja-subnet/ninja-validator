@@ -7,7 +7,9 @@ that idle logging is edge-triggered.
 
 from __future__ import annotations
 
+import asyncio
 import logging
+import signal
 from types import SimpleNamespace
 
 import pytest
@@ -28,6 +30,7 @@ from tau.duel import (
     WaitReason,
 )
 from tau.workers.duel_resolver import DuelResolverConfig
+from tau.workers.duel_resolver.main import _signal_handlers
 from tau.workers.duel_resolver.pipeline import _apply
 from tau.workers.duel_resolver.telemetry import TickLog, emit_axiom
 
@@ -125,6 +128,22 @@ class FakePromotionPublisher:
 
 
 # -- config -------------------------------------------------------------------------
+
+
+def test_control_signals_pause_resume_and_stop() -> None:
+    stop = asyncio.Event()
+    paused = asyncio.Event()
+    handlers = dict(_signal_handlers(stop, paused))
+
+    handlers[signal.SIGUSR1]()
+    assert paused.is_set()
+    assert not stop.is_set()
+
+    handlers[signal.SIGUSR2]()
+    assert not paused.is_set()
+
+    handlers[signal.SIGTERM]()
+    assert stop.is_set()
 
 
 def test_config_from_env_reads_overrides() -> None:
