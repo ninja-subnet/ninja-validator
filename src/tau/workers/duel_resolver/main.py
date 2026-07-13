@@ -81,6 +81,10 @@ async def _serve(config: DuelResolverConfig, targets: PoolTargets) -> None:
             scoring_method=config.scoring_method.value,
             round_win_margin=config.round_win_margin,
             mean_score_margin=config.mean_score_margin,
+            token_bonus_enabled=config.token_efficiency.enabled,
+            token_score_tolerance=config.token_score_tolerance,
+            token_min_score=config.token_min_score,
+            token_bonus_multiplier=config.token_bonus_multiplier,
             pool_one_target=targets.pool_one,
             pool_two_target=targets.pool_two,
         )

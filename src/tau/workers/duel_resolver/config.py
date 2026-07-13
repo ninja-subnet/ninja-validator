@@ -7,8 +7,19 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
-from tau.duel import DEFAULT_MEAN_SCORE_MARGIN, DuelScoringMethod
-from tau.utils.env import env_bool, env_float, env_int, env_str
+from tau.duel import (
+    DEFAULT_MEAN_SCORE_MARGIN,
+    DuelScoringMethod,
+    TokenEfficiencyConfig,
+)
+from tau.utils.env import (
+    env_bool,
+    env_bool_strict,
+    env_float,
+    env_float_strict,
+    env_int,
+    env_str,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -16,8 +27,13 @@ class DuelResolverConfig:
     scoring_method: DuelScoringMethod = DuelScoringMethod.ROUND_WINS
     # Margin for round-win scoring (`wins > losses + margin`).
     round_win_margin: int = 0
-    # Margin for mean-score scoring (`challenger_mean - king_mean >= margin`).
+    # Margin for mean scoring after each side's token boost is added.
     mean_score_margin: float = DEFAULT_MEAN_SCORE_MARGIN
+    # Symmetric per-task token-efficiency modifier for mean-score duels.
+    token_bonus_enabled: bool = False
+    token_score_tolerance: float = 0.05
+    token_min_score: float = 0.20
+    token_bonus_multiplier: float = 0.15
     # Idle sleep between poll ticks (seconds).
     poll_seconds: float = 5.0
     # Optional GitHub publication for promoted local submission bundles.
@@ -35,6 +51,11 @@ class DuelResolverConfig:
             raise ValueError("round_win_margin must be >= 0")
         if self.mean_score_margin < 0:
             raise ValueError("mean_score_margin must be >= 0")
+        if not isinstance(self.token_bonus_enabled, bool):
+            raise ValueError("token_bonus_enabled must be a bool")
+        # Reuse the pure scoring config's validation so env and direct construction
+        # reject the same values.
+        self.token_efficiency
         if self.poll_seconds <= 0:
             raise ValueError("poll_seconds must be positive")
         if not self.promotion_publish_branch.strip():
@@ -53,6 +74,23 @@ class DuelResolverConfig:
             and self.promotion_publish_repo.strip()
             and self.promotion_github_token
             and self.promotion_github_token.strip()
+        )
+
+    @property
+    def token_efficiency(self) -> TokenEfficiencyConfig:
+        """Effective token settings shared by calculation and audit writes.
+
+        Round-win duels do not use quality scores, so the modifier is off even if
+        its environment switch is set.
+        """
+        return TokenEfficiencyConfig(
+            enabled=(
+                self.token_bonus_enabled
+                and self.scoring_method is DuelScoringMethod.MEAN
+            ),
+            score_tolerance=self.token_score_tolerance,
+            min_score=self.token_min_score,
+            bonus_multiplier=self.token_bonus_multiplier,
         )
 
     @classmethod
@@ -92,6 +130,18 @@ class DuelResolverConfig:
             scoring_method=scoring_method,
             round_win_margin=round_win_margin,
             mean_score_margin=mean_score_margin,
+            token_bonus_enabled=env_bool_strict(
+                env, "TAU_DUEL_TOKEN_BONUS_ENABLED", d.token_bonus_enabled
+            ),
+            token_score_tolerance=env_float_strict(
+                env, "TAU_DUEL_TOKEN_SCORE_TOLERANCE", d.token_score_tolerance
+            ),
+            token_min_score=env_float_strict(
+                env, "TAU_DUEL_TOKEN_MIN_SCORE", d.token_min_score
+            ),
+            token_bonus_multiplier=env_float_strict(
+                env, "TAU_DUEL_TOKEN_BONUS_MULTIPLIER", d.token_bonus_multiplier
+            ),
             poll_seconds=poll_seconds,
             promotion_publish_repo=publish_repo or None,
             promotion_publish_branch=publish_branch,

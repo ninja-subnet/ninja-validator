@@ -8,6 +8,7 @@ from tau.db import ChallengeStatus, GeneratorDb, PoolType, SubmissionStatus, Tas
 from tau.db.solver import _duel_side_order
 from tau.db.models import (
     Challenge,
+    DuelResolution,
     DuelTaskSolution,
     Judgement,
     King,
@@ -252,6 +253,27 @@ def test_duel_task_solution_is_scoped_to_challenge() -> None:
         "challenger_submission_id",
     ) in fk_targets
     assert ("submission_id", "submissions", "submission_id") in fk_targets
+
+
+def test_duel_resolution_keeps_raw_token_and_merged_scores() -> None:
+    columns = DuelResolution.__table__.columns
+    assert {
+        "king_score_mean",
+        "challenger_score_mean",
+        "score_mean_delta",
+        "king_total_tokens",
+        "challenger_total_tokens",
+        "king_token_boost",
+        "challenger_token_boost",
+        "king_combined_score",
+        "challenger_combined_score",
+        "combined_score_delta",
+    } <= set(columns.keys())
+    assert columns.king_total_tokens.nullable is True
+    assert columns.challenger_total_tokens.nullable is True
+    assert columns.king_combined_score.nullable is True
+    assert columns.challenger_combined_score.nullable is True
+    assert columns.combined_score_delta.nullable is True
 
 
 def test_duel_side_order_is_stable_and_varies_by_task() -> None:

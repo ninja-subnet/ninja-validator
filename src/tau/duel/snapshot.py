@@ -20,11 +20,37 @@ class Tally:
     challenger_score_mean: float = 0.0
     score_mean_delta: float = 0.0
     score_mean_rounds: int = 0
+    # None means at least one judged task had no trustworthy usage count. This keeps
+    # a partial sum from being presented as the pool total.
+    king_total_tokens: int | None = None
+    challenger_total_tokens: int | None = None
+    token_comparison_rounds: int = 0
+    king_token_savings_mean: float = 0.0
+    challenger_token_savings_mean: float = 0.0
+    king_token_boost: float = 0.0
+    challenger_token_boost: float = 0.0
 
     @property
     def judged(self) -> int:
         """Rounds judged so far."""
         return self.wins + self.losses + self.ties
+
+    @property
+    def king_combined_score(self) -> float:
+        """King quality mean after its token-efficiency boost."""
+        return self.king_score_mean + self.king_token_boost
+
+    @property
+    def challenger_combined_score(self) -> float:
+        """Challenger quality mean after its token-efficiency boost."""
+        return self.challenger_score_mean + self.challenger_token_boost
+
+    @property
+    def combined_score_delta(self) -> float:
+        """Challenger-minus-king delta after both token boosts."""
+        return (
+            self.score_mean_delta + self.challenger_token_boost - self.king_token_boost
+        )
 
 
 @dataclass(frozen=True, slots=True)

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from enum import StrEnum
 
-DEFAULT_MEAN_SCORE_MARGIN: float = 0.05
+DEFAULT_MEAN_SCORE_MARGIN: float = 0.10
 
 
 class DuelScoringMethod(StrEnum):

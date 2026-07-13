@@ -36,6 +36,8 @@ def _active(
     challenger_score_mean: float = 0.0,
     score_mean_delta: float = 0.0,
     score_mean_rounds: int = 0,
+    king_token_boost: float = 0.0,
+    challenger_token_boost: float = 0.0,
     target: int = 50,
     registered: bool = True,
 ) -> ActiveChallenge:
@@ -52,6 +54,8 @@ def _active(
             challenger_score_mean=challenger_score_mean,
             score_mean_delta=score_mean_delta,
             score_mean_rounds=score_mean_rounds,
+            king_token_boost=king_token_boost,
+            challenger_token_boost=challenger_token_boost,
         ),
         challenger_registered=registered,
     )
@@ -99,14 +103,18 @@ def test_tally_judged_and_remaining() -> None:
     assert Tally(2, 3, 1).judged == 6
     assert Tally(2, 3, 1, score_mean_rounds=4).judged == 6
     assert _active(wins=10, losses=5, ties=5, target=50).remaining == 30
-    assert _active(wins=30, losses=30, target=50).remaining == 0  # over-count floors at 0
+    assert (
+        _active(wins=30, losses=30, target=50).remaining == 0
+    )  # over-count floors at 0
 
 
 # -- decide: king presence / opening ------------------------------------------------
 
 
 def test_no_king_waits_even_with_a_challenger_queued() -> None:
-    assert decide(_snapshot(king=None, next_challenger="chal")) == Nothing(WaitReason.NO_KING)
+    assert decide(_snapshot(king=None, next_challenger="chal")) == Nothing(
+        WaitReason.NO_KING
+    )
 
 
 def test_king_no_challenge_no_challenger_waits() -> None:
@@ -161,7 +169,9 @@ def test_pool_two_unbeatable_promotes() -> None:
 
 def test_cannot_catch_closes_king_defended() -> None:
     active = _active(P1, wins=0, losses=26, target=50)
-    assert decide(_snapshot(active)) == CloseChallenge(active, CloseReason.KING_DEFENDED)
+    assert decide(_snapshot(active)) == CloseChallenge(
+        active, CloseReason.KING_DEFENDED
+    )
 
 
 def test_one_nil_does_not_decide_prematurely() -> None:
@@ -180,13 +190,17 @@ def test_final_win_in_pool_one_advances() -> None:
 
 def test_final_tie_on_tally_king_holds() -> None:
     active = _active(P1, wins=1, losses=1, target=2)
-    assert decide(_snapshot(active)) == CloseChallenge(active, CloseReason.KING_DEFENDED)
+    assert decide(_snapshot(active)) == CloseChallenge(
+        active, CloseReason.KING_DEFENDED
+    )
 
 
 def test_all_ties_king_holds() -> None:
     # Failure-ties fill the pool but never help the challenger.
     active = _active(P1, wins=0, losses=0, ties=2, target=2)
-    assert decide(_snapshot(active)) == CloseChallenge(active, CloseReason.KING_DEFENDED)
+    assert decide(_snapshot(active)) == CloseChallenge(
+        active, CloseReason.KING_DEFENDED
+    )
 
 
 # -- decide: deregistration short-circuit -------------------------------------------
@@ -285,7 +299,45 @@ def test_mean_scoring_king_holds_when_margin_does_not_clear() -> None:
     ) == CloseChallenge(active, CloseReason.KING_DEFENDED)
 
 
-def test_mean_scoring_default_margin_is_005() -> None:
+def test_mean_scoring_token_boost_can_clear_the_same_single_gate() -> None:
+    active = _active(
+        P1,
+        ties=2,
+        target=2,
+        king_score_mean=0.50,
+        challenger_score_mean=0.58,
+        score_mean_delta=0.08,
+        score_mean_rounds=2,
+        challenger_token_boost=0.03,
+    )
+
+    assert decide(
+        _snapshot(active),
+        scoring_method=DuelScoringMethod.MEAN,
+        mean_score_margin=0.10,
+    ) == AdvancePool(active)
+
+
+def test_mean_scoring_king_token_boost_can_prevent_a_pass() -> None:
+    active = _active(
+        P1,
+        ties=2,
+        target=2,
+        king_score_mean=0.50,
+        challenger_score_mean=0.61,
+        score_mean_delta=0.11,
+        score_mean_rounds=2,
+        king_token_boost=0.02,
+    )
+
+    assert decide(
+        _snapshot(active),
+        scoring_method=DuelScoringMethod.MEAN,
+        mean_score_margin=0.10,
+    ) == CloseChallenge(active, CloseReason.KING_DEFENDED)
+
+
+def test_mean_scoring_default_margin_is_010() -> None:
     active = _active(
         P1,
         wins=0,
@@ -297,7 +349,7 @@ def test_mean_scoring_default_margin_is_005() -> None:
         score_mean_delta=0.04,
         score_mean_rounds=2,
     )
-    assert DEFAULT_MEAN_SCORE_MARGIN == 0.05
+    assert DEFAULT_MEAN_SCORE_MARGIN == 0.10
     assert decide(
         _snapshot(active),
         scoring_method=DuelScoringMethod.MEAN,
@@ -306,6 +358,6 @@ def test_mean_scoring_default_margin_is_005() -> None:
 
 def test_mean_scoring_king_holds_without_scored_rounds() -> None:
     active = _active(P1, wins=0, losses=0, ties=2, target=2)
-    assert decide(_snapshot(active), scoring_method=DuelScoringMethod.MEAN) == CloseChallenge(
-        active, CloseReason.KING_DEFENDED
-    )
+    assert decide(
+        _snapshot(active), scoring_method=DuelScoringMethod.MEAN
+    ) == CloseChallenge(active, CloseReason.KING_DEFENDED)
