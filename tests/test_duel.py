@@ -62,11 +62,13 @@ def _snapshot(
     *,
     king: str | None = "king",
     next_challenger: str | None = None,
+    task_pools_ready: bool = True,
 ) -> ChallengeSnapshot:
     return ChallengeSnapshot(
         reigning_king_submission_id=king,
         active_challenge=active,
         next_challenger_submission_id=next_challenger,
+        task_pools_ready=task_pools_ready,
     )
 
 
@@ -111,6 +113,16 @@ def test_king_no_challenge_no_challenger_waits() -> None:
     assert decide(_snapshot(king="k", next_challenger=None)) == Nothing(
         WaitReason.NO_CHALLENGER
     )
+
+
+def test_king_waits_for_both_task_pools_before_opening_challenge() -> None:
+    assert decide(
+        _snapshot(
+            king="k",
+            next_challenger="chal",
+            task_pools_ready=False,
+        )
+    ) == Nothing(WaitReason.POOLS_NOT_READY)
 
 
 def test_king_no_challenge_opens_for_next_challenger() -> None:

@@ -51,3 +51,4 @@ class ChallengeSnapshot:
     reigning_king_submission_id: str | None
     active_challenge: ActiveChallenge | None
     next_challenger_submission_id: str | None
+    task_pools_ready: bool = True

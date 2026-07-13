@@ -16,7 +16,7 @@ from tau.pools import PoolTargets
 
 from . import models
 from .engine import async_session_factory, async_session_scope, create_async_db_engine
-from .status import ChallengeStatus, DuelOutcome, PoolType, SubmissionStatus
+from .status import ChallengeStatus, DuelOutcome, PoolType, SubmissionStatus, TaskStatus
 
 _ACTIVE_STATUSES = (int(ChallengeStatus.POOL_ONE), int(ChallengeStatus.POOL_TWO))
 
@@ -41,12 +41,20 @@ class DuelResolverDb:
         async with async_session_scope(self._sessions) as session:
             king_id = await self._reigning_king(session)
             if king_id is None:
-                return ChallengeSnapshot(None, None, None)
+                return ChallengeSnapshot(None, None, None, task_pools_ready=False)
             active = await self._active_challenge(session, king_id, targets)
+            if active is not None:
+                return ChallengeSnapshot(king_id, active, None)
+            task_pools_ready = await self._task_pools_ready(session, king_id, targets)
             next_challenger = (
-                None if active is not None else await self._next_challenger(session)
+                await self._next_challenger(session) if task_pools_ready else None
             )
-            return ChallengeSnapshot(king_id, active, next_challenger)
+            return ChallengeSnapshot(
+                king_id,
+                None,
+                next_challenger,
+                task_pools_ready=task_pools_ready,
+            )
 
     # -- writes (guarded conditional transitions) ----------------------------------
 
@@ -209,6 +217,27 @@ class DuelResolverDb:
             select(models.King.king_id).order_by(models.King.king_from.desc()).limit(1)
         )
         return (await session.scalars(stmt)).first()
+
+    async def _task_pools_ready(
+        self, session: AsyncSession, king_id: str, targets: PoolTargets
+    ) -> bool:
+        """Whether both task pools have enough qualified rounds to start a duel."""
+        rows = await session.execute(
+            select(models.Task.pool_type, func.count(models.Task.task_id))
+            .where(
+                models.Task.king_id == king_id,
+                models.Task.status_id == int(TaskStatus.QUALIFIED),
+                models.Task.pool_type.in_(
+                    (int(PoolType.POOL_ONE), int(PoolType.POOL_TWO))
+                ),
+            )
+            .group_by(models.Task.pool_type)
+        )
+        counts = {int(pool): int(count) for pool, count in rows.all()}
+        return (
+            counts.get(int(PoolType.POOL_ONE), 0) >= targets.pool_one
+            and counts.get(int(PoolType.POOL_TWO), 0) >= targets.pool_two
+        )
 
     async def _active_challenge(
         self, session: AsyncSession, king_id: str, targets: PoolTargets
