@@ -38,6 +38,7 @@ from tau.db.status import (
 from tau.pools import PoolTargets
 from tau.utils.env import env_float, env_int, env_str
 from tau.utils.logging import configure_logging
+from tau.weights.compute import king_emission_shares
 
 log = logging.getLogger(__name__)
 
@@ -136,7 +137,7 @@ class PublicDashboard:
             recent_duels = _recent_completed_duels(
                 session, limit=self._config.recent_duels
             )
-            recent_kings = _recent_kings(session, limit=12)
+            recent_kings = _recent_kings(session, limit=5, now=now)
             leaderboard = _leaderboard(session, current_king, limit=20)
             queue = _queue(session, limit=500, now=now)
             workers = _worker_freshness(
@@ -1730,15 +1731,39 @@ def _public_changed_lines(diff: str) -> int:
     return count
 
 
-def _recent_kings(session: Session, *, limit: int) -> list[dict[str, Any]]:
+def _recent_kings(
+    session: Session, *, limit: int, now: dt.datetime
+) -> list[dict[str, Any]]:
     rows = session.execute(
         text(
             """
+            WITH reigns AS (
+                SELECT
+                    k.king_id,
+                    k.king_from,
+                    lead(k.king_from) OVER (ORDER BY k.king_from) AS king_until
+                FROM kings k
+            ),
+            defenses AS (
+                SELECT
+                    c.king_id,
+                    count(DISTINCT c.challenger_submission_id) AS king_duels_defended
+                FROM challenges c
+                WHERE EXISTS (
+                    SELECT 1
+                    FROM duel_resolutions dr
+                    WHERE dr.challenger_submission_id = c.challenger_submission_id
+                      AND dr.outcome = :king_won
+                )
+                GROUP BY c.king_id
+            )
             SELECT
                 k.king_id AS submission_id,
                 k.king_from,
+                k.king_until,
                 s.hotkey,
                 s.source,
+                coalesce(d.king_duels_defended, 0) AS king_duels_defended,
                 (
                     SELECT r.uid
                     FROM registrations r
@@ -1746,18 +1771,26 @@ def _recent_kings(session: Session, *, limit: int) -> list[dict[str, Any]]:
                     ORDER BY r.block DESC
                     LIMIT 1
                 ) AS uid
-            FROM kings k
+            FROM reigns k
             JOIN submissions s ON s.submission_id = k.king_id
+            LEFT JOIN defenses d ON d.king_id = k.king_id
             ORDER BY k.king_from DESC
             LIMIT :limit
             """
         ),
-        {"limit": limit},
+        {"limit": limit, "king_won": int(DuelOutcome.KING_WON)},
     ).mappings()
+    king_rows = list(rows)
+    shares = king_emission_shares(limit, len(king_rows))
     kings = []
-    for index, row in enumerate(rows):
+    for index, row in enumerate(king_rows):
         item = _public_submission(row, crowned_at=row["king_from"])
-        item["share"] = 1.0 if index == 0 else None
+        reign_end = row["king_until"] or now
+        item["hold_seconds"] = max(
+            0, int((reign_end - row["king_from"]).total_seconds())
+        )
+        item["king_duels_defended"] = int(row["king_duels_defended"] or 0)
+        item["share"] = shares[index] if index < len(shares) else None
         kings.append(item)
     return kings
 
