@@ -1,10 +1,11 @@
 import datetime as dt
 import json
+from unittest.mock import Mock
 
 from sqlalchemy import create_engine, text
 from sqlalchemy.orm import Session
 
-from tau.db.status import PoolType, SubmissionStatus, TaskStatus
+from tau.db.status import DuelOutcome, PoolType, SubmissionStatus, TaskStatus
 from tau.pools import PoolTargets
 from tau.dashboard.public import (
     DashboardConfig,
@@ -20,6 +21,7 @@ from tau.dashboard.public import (
     _public_repo,
     _public_round_winner,
     _queue,
+    _recent_kings,
     _resolution_score_fields,
     _scoring_config,
     _task_token_score_fields,
@@ -70,6 +72,46 @@ def test_public_round_winner_marks_error_even_without_llm_winner() -> None:
     assert _public_round_winner(None, None) == "pending"
     assert _public_round_winner("challenger", None) == "challenger"
     assert _public_round_winner("unexpected", None) == "tie"
+
+
+def test_recent_kings_exposes_real_defenses_reign_duration_and_shares() -> None:
+    now = dt.datetime(2026, 7, 13, 12, 0, tzinfo=dt.UTC)
+    current_from = now - dt.timedelta(hours=2)
+    prior_from = current_from - dt.timedelta(hours=3)
+    result = Mock()
+    result.mappings.return_value = [
+        {
+            "submission_id": "current",
+            "king_from": current_from,
+            "king_until": None,
+            "hotkey": "current-hotkey",
+            "source": "/private/current",
+            "uid": 1,
+            "king_duels_defended": 174,
+        },
+        {
+            "submission_id": "prior",
+            "king_from": prior_from,
+            "king_until": current_from,
+            "hotkey": "prior-hotkey",
+            "source": "/private/prior",
+            "uid": 2,
+            "king_duels_defended": 42,
+        },
+    ]
+    session = Mock()
+    session.execute.return_value = result
+
+    kings = _recent_kings(session, limit=5, now=now)
+
+    assert [king["submission_id"] for king in kings] == ["current", "prior"]
+    assert [king["king_duels_defended"] for king in kings] == [174, 42]
+    assert [king["hold_seconds"] for king in kings] == [7200, 10800]
+    assert [king["share"] for king in kings] == [0.60, 0.40]
+    assert session.execute.call_args.args[1] == {
+        "limit": 5,
+        "king_won": int(DuelOutcome.KING_WON),
+    }
 
 
 def test_resolution_score_fields_expose_raw_boost_final_and_token_totals() -> None:
