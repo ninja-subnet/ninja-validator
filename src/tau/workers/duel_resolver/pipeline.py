@@ -41,9 +41,10 @@ async def run_duel_resolver(
     targets: PoolTargets,
     config: DuelResolverConfig,
     stop: asyncio.Event,
+    new_challenges_paused: asyncio.Event,
     promotion_publisher: PromotionPublisher | None = None,
 ) -> None:
-    """Poll, decide, and apply one action per tick until *stop* is set."""
+    """Poll and apply one action per tick; a pause only blocks new challenges."""
     log.info(
         "duel resolver running: poll %.0fs scoring=%s",
         config.poll_seconds,
@@ -58,6 +59,7 @@ async def run_duel_resolver(
                 scoring_method=config.scoring_method,
                 round_win_margin=config.round_win_margin,
                 mean_score_margin=config.mean_score_margin,
+                new_challenges_paused=new_challenges_paused.is_set(),
             )
             await _apply(
                 db,

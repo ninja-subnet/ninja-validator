@@ -125,6 +125,21 @@ def test_king_waits_for_both_task_pools_before_opening_challenge() -> None:
     ) == Nothing(WaitReason.POOLS_NOT_READY)
 
 
+def test_paused_resolver_does_not_open_a_new_challenge() -> None:
+    assert decide(
+        _snapshot(king="k", next_challenger="chal"),
+        new_challenges_paused=True,
+    ) == Nothing(WaitReason.NEW_CHALLENGES_PAUSED)
+
+
+def test_paused_resolver_still_finishes_the_active_duel() -> None:
+    active = _active(P2, wins=2, target=2)
+    assert decide(
+        _snapshot(active),
+        new_challenges_paused=True,
+    ) == Promote(active)
+
+
 def test_king_no_challenge_opens_for_next_challenger() -> None:
     assert decide(_snapshot(king="k", next_challenger="chal")) == OpenChallenge(
         "k", "chal"

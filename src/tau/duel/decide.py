@@ -31,6 +31,7 @@ def decide(
     scoring_method: DuelScoringMethod = DuelScoringMethod.ROUND_WINS,
     round_win_margin: int = 0,
     mean_score_margin: float = DEFAULT_MEAN_SCORE_MARGIN,
+    new_challenges_paused: bool = False,
 ) -> Action:
     """Map *snapshot* to the one action due this tick, cheapest states first."""
     if snapshot.reigning_king_submission_id is None:
@@ -38,6 +39,8 @@ def decide(
 
     active = snapshot.active_challenge
     if active is None:
+        if new_challenges_paused:
+            return Nothing(WaitReason.NEW_CHALLENGES_PAUSED)
         if not snapshot.task_pools_ready:
             return Nothing(WaitReason.POOLS_NOT_READY)
         # A king with no active challenge: start one if a challenger is waiting.

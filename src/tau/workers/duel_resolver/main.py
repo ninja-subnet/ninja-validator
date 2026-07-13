@@ -1,7 +1,7 @@
 """Entry point and dependency wiring for the duel-resolver worker.
 
-Builds the DB seam, installs signal handlers for a graceful stop, and hands them to
-the pipeline's run loop.
+Builds the DB seam and installs signal handlers: SIGINT/SIGTERM stop the worker,
+while SIGUSR1/SIGUSR2 pause/resume opening new challenges.
 """
 
 from __future__ import annotations
@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import signal
+from collections.abc import Callable
 from contextlib import AsyncExitStack
 
 from tau.axiom import get_axiom
@@ -25,6 +26,17 @@ from .config import DuelResolverConfig
 from .pipeline import run_duel_resolver
 
 log = logging.getLogger(__name__)
+
+
+def _signal_handlers(
+    stop: asyncio.Event, new_challenges_paused: asyncio.Event
+) -> tuple[tuple[int, Callable[[], None]], ...]:
+    return (
+        (signal.SIGTERM, stop.set),
+        (signal.SIGINT, stop.set),
+        (signal.SIGUSR1, new_challenges_paused.set),
+        (signal.SIGUSR2, new_challenges_paused.clear),
+    )
 
 
 def main() -> None:
@@ -54,10 +66,11 @@ async def _serve(config: DuelResolverConfig, targets: PoolTargets) -> None:
                 ),
             )
         stop = asyncio.Event()
+        new_challenges_paused = asyncio.Event()
         loop = asyncio.get_running_loop()
-        for sig in (signal.SIGTERM, signal.SIGINT):
+        for sig, callback in _signal_handlers(stop, new_challenges_paused):
             try:
-                loop.add_signal_handler(sig, stop.set)
+                loop.add_signal_handler(sig, callback)
             except NotImplementedError:  # e.g. Windows / restricted loop
                 pass
         log.info("duel resolver starting")
@@ -77,6 +90,7 @@ async def _serve(config: DuelResolverConfig, targets: PoolTargets) -> None:
                 targets=targets,
                 config=config,
                 stop=stop,
+                new_challenges_paused=new_challenges_paused,
                 promotion_publisher=promotion_publisher,
             )
         finally:

@@ -347,6 +347,8 @@ against races even though it never holds locks across ticks.
   snapshots the tally, `best_of`, `win_margin`, and `outcome`.
 - **Crowns** a new king on a POOL_TWO win by inserting into `kings`
   (`ON CONFLICT DO NOTHING`).
+- **Drains safely:** `SIGUSR1` lets the active duel finish but blocks the next
+  challenge; `SIGUSR2` resumes opening challenges.
 - Config: `TAU_DUEL_WIN_MARGIN` (default `0`), `TAU_DUEL_POLL_SECONDS`
   (default `5`).
 
@@ -519,6 +521,16 @@ docker compose logs migrate     # confirm "alembic upgrade head" succeeded
 
 - **duel-resolver is a singleton.** It is the sole writer of `challenges`/`kings`
   — never `--scale duel-resolver`. Others (judge, task-solver) can scale.
+- **Pause between duels for maintenance:** send `SIGUSR1`, then wait for
+  `idle: new_challenges_paused` before stopping or rebuilding services. The
+  active duel continues normally. Send `SIGUSR2` to cancel the pause:
+  ```bash
+  docker compose kill -s SIGUSR1 duel-resolver
+  docker compose logs -f duel-resolver
+  docker compose kill -s SIGUSR2 duel-resolver
+  ```
+  The pause lives in the running resolver, so after rebuilding, start the
+  resolver last when the rest of the stack is ready.
 - **Existing-validator rollout:** the screening migration is schema-only; it does
   not delete or retroactively rescore live tasks. To rebuild cleanly, stop the
   pool/duel workers and reset the reigning king's tasks at a challenge boundary.
