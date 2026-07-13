@@ -53,7 +53,9 @@ async def run_duel_resolver(
     ticklog = TickLog()
     while not stop.is_set():
         try:
-            snapshot = await db.snapshot(targets)
+            snapshot = await db.snapshot(
+                targets, token_efficiency=config.token_efficiency
+            )
             action = decide(
                 snapshot,
                 scoring_method=config.scoring_method,
@@ -104,6 +106,7 @@ async def _apply(
                 scoring_method=config.scoring_method,
                 round_win_margin=config.round_win_margin,
                 mean_score_margin=config.mean_score_margin,
+                token_efficiency=config.token_efficiency,
             )
             ticklog.action(
                 applied, f"advanced to pool two: {challenge.challenger_submission_id}"
@@ -121,6 +124,7 @@ async def _apply(
                 scoring_method=config.scoring_method,
                 round_win_margin=config.round_win_margin,
                 mean_score_margin=config.mean_score_margin,
+                token_efficiency=config.token_efficiency,
             )
             ticklog.action(
                 applied, f"promoted new king: {challenge.challenger_submission_id}"
@@ -132,6 +136,7 @@ async def _apply(
                 scoring_method=config.scoring_method,
                 round_win_margin=config.round_win_margin,
                 mean_score_margin=config.mean_score_margin,
+                token_efficiency=config.token_efficiency,
             )
             ticklog.action(
                 applied,

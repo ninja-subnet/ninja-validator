@@ -26,6 +26,7 @@ from tau.db.models import (
     Base,
     Challenge,
     DuelResolution,
+    DuelTaskSolution,
     Judgement,
     King,
     Registration,
@@ -40,7 +41,7 @@ from tau.db.status import (
     SubmissionStatus,
     TaskStatus,
 )
-from tau.duel import ActiveChallenge, DuelScoringMethod, Tally
+from tau.duel import ActiveChallenge, DuelScoringMethod, Tally, TokenEfficiencyConfig
 from tau.pools import PoolTargets
 
 load_dotenv(Path(__file__).resolve().parent.parent / ".env")
@@ -164,7 +165,30 @@ def _task_with_solutions(
         )
     )
     session.add(TaskSolution(task_id=task_id, submission_id=king, solution="ksol"))
-    session.add(TaskSolution(task_id=task_id, submission_id=challenger, solution="csol"))
+    session.add(
+        TaskSolution(task_id=task_id, submission_id=challenger, solution="csol")
+    )
+
+
+def _duel_solution(
+    session,
+    *,
+    task_id: str,
+    challenger: str,
+    submission: str,
+    total_tokens: int | None,
+) -> None:
+    session.add(
+        DuelTaskSolution(
+            task_id=task_id,
+            challenger_submission_id=challenger,
+            submission_id=submission,
+            solution="patch",
+            usage_summary=(
+                None if total_tokens is None else {"total_tokens": total_tokens}
+            ),
+        )
+    )
 
 
 def _qualified_task(session, *, task_id: str, king: str, pool: PoolType) -> None:
@@ -221,6 +245,7 @@ def _judgement(
     winner: str,
     king_score: float | None = None,
     challenger_score: float | None = None,
+    error: str | None = None,
 ) -> None:
     # Keep solution rows available for old-path compatibility; the resolver itself
     # only tallies saved judgements.
@@ -237,6 +262,7 @@ def _judgement(
                 if challenger_score is None
                 else challenger_score
             ),
+            error=error,
         )
     )
 
@@ -335,10 +361,14 @@ async def test_snapshot_reports_active_challenge_tally(db: DuelResolverDb) -> No
             ("t5", PoolType.POOL_TWO, "challenger"),
         ]
         for task_id, pool, _winner in rounds:
-            _task_with_solutions(session, task_id=task_id, king="k", challenger="c", pool=pool)
+            _task_with_solutions(
+                session, task_id=task_id, king="k", challenger="c", pool=pool
+            )
         await session.flush()  # solutions must exist before their judgements
         for task_id, _pool, winner in rounds:
-            _judgement(session, task_id=task_id, king="k", challenger="c", winner=winner)
+            _judgement(
+                session, task_id=task_id, king="k", challenger="c", winner=winner
+            )
 
     snap = await db.snapshot(targets)
     active = snap.active_challenge
@@ -359,6 +389,165 @@ async def test_snapshot_reports_active_challenge_tally(db: DuelResolverDb) -> No
     assert active.challenger_registered is True
     # decide ignores it while a duel runs, so the seam skips computing it.
     assert snap.next_challenger_submission_id is None
+
+
+async def test_snapshot_calculates_symmetric_per_task_token_boosts(
+    db: DuelResolverDb,
+) -> None:
+    targets = PoolTargets(pool_one=4, pool_two=4)
+    rounds = [
+        # Challenger uses half: challenger saving 0.50.
+        ("t1", 0.50, 0.50, 100, 50),
+        # King uses one quarter: king saving 0.75.
+        ("t2", 0.50, 0.50, 50, 200),
+        # A neutral judge-error fallback must not earn the apparent saving.
+        ("t3", 0.50, 0.50, 100, 50),
+        # Missing challenger usage contributes no saving; king tokens still total.
+        ("t4", 0.50, 0.50, 75, None),
+    ]
+    async with async_session_scope(db._sessions) as session:  # noqa: SLF001
+        _submission(session, "k", hotkey="hk-k", block=1)
+        _submission(session, "c", hotkey="hk-c", block=2)
+        session.add(King(king_id="k"))
+        _registration(session, uid=0, hotkey="hk-k", block=1)
+        _registration(session, uid=1, hotkey="hk-c", block=2)
+        session.add(
+            Challenge(
+                challenger_submission_id="c",
+                king_id="k",
+                status=int(ChallengeStatus.POOL_ONE),
+            )
+        )
+        for (
+            task_id,
+            king_score,
+            challenger_score,
+            king_tokens,
+            challenger_tokens,
+        ) in rounds:
+            _task_with_solutions(
+                session,
+                task_id=task_id,
+                king="k",
+                challenger="c",
+                pool=PoolType.POOL_ONE,
+            )
+            _duel_solution(
+                session,
+                task_id=task_id,
+                challenger="c",
+                submission="k",
+                total_tokens=king_tokens,
+            )
+            _duel_solution(
+                session,
+                task_id=task_id,
+                challenger="c",
+                submission="c",
+                total_tokens=challenger_tokens,
+            )
+        await session.flush()
+        for (
+            task_id,
+            king_score,
+            challenger_score,
+            _king_tokens,
+            _challenger_tokens,
+        ) in rounds:
+            _judgement(
+                session,
+                task_id=task_id,
+                king="k",
+                challenger="c",
+                winner="tie",
+                king_score=king_score,
+                challenger_score=challenger_score,
+                error="judge failed" if task_id == "t3" else None,
+            )
+
+    snap = await db.snapshot(
+        targets,
+        token_efficiency=TokenEfficiencyConfig(enabled=True),
+    )
+    assert snap.active_challenge is not None
+    tally = snap.active_challenge.tally
+    assert tally.king_score_mean == pytest.approx(0.50)
+    assert tally.challenger_score_mean == pytest.approx(0.50)
+    assert tally.score_mean_delta == 0
+    assert tally.king_total_tokens == 325
+    assert tally.challenger_total_tokens is None
+    assert tally.token_comparison_rounds == 3
+    # Savings use the full four-task denominator, not three comparable tasks.
+    assert tally.king_token_savings_mean == pytest.approx(0.75 / 4)
+    assert tally.challenger_token_savings_mean == pytest.approx(0.50 / 4)
+    assert tally.king_token_boost == pytest.approx(0.028125)
+    assert tally.challenger_token_boost == pytest.approx(0.01875)
+    assert tally.combined_score_delta == pytest.approx(-0.009375)
+
+
+async def test_snapshot_token_totals_include_solved_rows_not_yet_judged(
+    db: DuelResolverDb,
+) -> None:
+    targets = PoolTargets(pool_one=2, pool_two=2)
+    async with async_session_scope(db._sessions) as session:  # noqa: SLF001
+        _submission(session, "k", hotkey="hk-k", block=1)
+        _submission(session, "c", hotkey="hk-c", block=2)
+        session.add(King(king_id="k"))
+        _registration(session, uid=0, hotkey="hk-k", block=1)
+        _registration(session, uid=1, hotkey="hk-c", block=2)
+        session.add(
+            Challenge(
+                challenger_submission_id="c",
+                king_id="k",
+                status=int(ChallengeStatus.POOL_ONE),
+            )
+        )
+        for task_id, king_tokens, challenger_tokens in (
+            ("judged", 100, 50),
+            ("solved-only", 200, 80),
+        ):
+            _task_with_solutions(
+                session,
+                task_id=task_id,
+                king="k",
+                challenger="c",
+                pool=PoolType.POOL_ONE,
+            )
+            _duel_solution(
+                session,
+                task_id=task_id,
+                challenger="c",
+                submission="k",
+                total_tokens=king_tokens,
+            )
+            _duel_solution(
+                session,
+                task_id=task_id,
+                challenger="c",
+                submission="c",
+                total_tokens=challenger_tokens,
+            )
+        await session.flush()
+        _judgement(
+            session,
+            task_id="judged",
+            king="k",
+            challenger="c",
+            winner="tie",
+        )
+
+    snap = await db.snapshot(
+        targets,
+        token_efficiency=TokenEfficiencyConfig(enabled=True),
+    )
+
+    assert snap.active_challenge is not None
+    tally = snap.active_challenge.tally
+    assert tally.king_total_tokens == 300
+    assert tally.challenger_total_tokens == 130
+    assert tally.token_comparison_rounds == 1
+    assert tally.challenger_token_savings_mean == pytest.approx(0.25)
+    assert tally.challenger_token_boost == pytest.approx(0.0375)
 
 
 async def test_snapshot_marks_a_deregistered_challenger(db: DuelResolverDb) -> None:
@@ -428,7 +617,9 @@ async def _challenge_status(db: DuelResolverDb) -> int | None:
         return None if challenge is None else challenge.status
 
 
-async def _resolutions(db: DuelResolverDb, challenger: str = "c") -> list[DuelResolution]:
+async def _resolutions(
+    db: DuelResolverDb, challenger: str = "c"
+) -> list[DuelResolution]:
     async with async_session_scope(db._sessions) as session:  # noqa: SLF001
         rows = await session.scalars(
             select(DuelResolution)
@@ -462,21 +653,42 @@ async def test_advance_pool_records_the_win_and_is_guarded(db: DuelResolverDb) -
             challenger_score_mean=0.75,
             score_mean_delta=0.5,
             score_mean_rounds=4,
+            king_total_tokens=1200,
+            challenger_total_tokens=900,
+            token_comparison_rounds=4,
+            king_token_savings_mean=0.10,
+            challenger_token_savings_mean=0.20,
+            king_token_boost=0.01,
+            challenger_token_boost=0.02,
         ),
         pool_target=5,
     )
-    assert await db.advance_pool(
-        challenge,
-        scoring_method=DuelScoringMethod.ROUND_WINS,
-        round_win_margin=2,
-        mean_score_margin=0.05,
-    ) is True
+    token_config = TokenEfficiencyConfig(
+        enabled=True,
+        score_tolerance=0.04,
+        min_score=0.25,
+        bonus_multiplier=0.10,
+    )
+    assert (
+        await db.advance_pool(
+            challenge,
+            scoring_method=DuelScoringMethod.ROUND_WINS,
+            round_win_margin=2,
+            mean_score_margin=0.05,
+            token_efficiency=token_config,
+        )
+        is True
+    )
     assert await _challenge_status(db) == int(ChallengeStatus.POOL_TWO)
     rows = await _resolutions(db)
     assert len(rows) == 1
     assert rows[0].pool_type == int(PoolType.POOL_ONE)
     assert rows[0].outcome == int(DuelOutcome.CHALLENGER_WON)
-    assert (rows[0].challenger_wins, rows[0].challenger_losses, rows[0].ties) == (3, 1, 0)
+    assert (rows[0].challenger_wins, rows[0].challenger_losses, rows[0].ties) == (
+        3,
+        1,
+        0,
+    )
     assert rows[0].best_of == 5
     assert rows[0].scoring_method == "round_wins"
     assert rows[0].round_win_margin == 2
@@ -485,14 +697,33 @@ async def test_advance_pool_records_the_win_and_is_guarded(db: DuelResolverDb) -
     assert rows[0].challenger_score_mean == 0.75
     assert rows[0].score_mean_delta == 0.5
     assert rows[0].score_mean_rounds == 4
+    # Round-win mode never applies or advertises a token modifier, even if a caller
+    # accidentally passes an enabled token config and a tally containing boosts.
+    assert rows[0].token_bonus_enabled is False
+    assert rows[0].token_score_tolerance == 0.04
+    assert rows[0].token_min_score == 0.25
+    assert rows[0].token_bonus_multiplier == 0.10
+    assert rows[0].king_total_tokens == 1200
+    assert rows[0].challenger_total_tokens == 900
+    assert rows[0].token_comparison_rounds == 4
+    assert rows[0].king_token_savings_mean == 0
+    assert rows[0].challenger_token_savings_mean == 0
+    assert rows[0].king_token_boost == 0
+    assert rows[0].challenger_token_boost == 0
+    assert rows[0].king_combined_score == 0.25
+    assert rows[0].challenger_combined_score == 0.75
+    assert rows[0].combined_score_delta == 0.50
     # Stale retry (still expecting POOL_ONE) is a no-op now that it is POOL_TWO,
     # and records nothing more.
-    assert await db.advance_pool(
-        challenge,
-        scoring_method=DuelScoringMethod.ROUND_WINS,
-        round_win_margin=2,
-        mean_score_margin=0.05,
-    ) is False
+    assert (
+        await db.advance_pool(
+            challenge,
+            scoring_method=DuelScoringMethod.ROUND_WINS,
+            round_win_margin=2,
+            mean_score_margin=0.05,
+        )
+        is False
+    )
     assert len(await _resolutions(db)) == 1
 
 
@@ -501,24 +732,66 @@ async def test_close_challenge_sets_closed_and_records_outcome(
 ) -> None:
     await _seed_king_and_challenger(db)
     await db.open_challenge("k", "c")
-    challenge = _ac("c", "k", PoolType.POOL_ONE, tally=Tally(0, 3, 1), pool_target=4)
-    assert await db.close_challenge(
-        challenge,
-        DuelOutcome.KING_WON,
-        scoring_method=DuelScoringMethod.MEAN,
-        round_win_margin=1,
-        mean_score_margin=0.075,
-    ) is True
+    challenge = _ac(
+        "c",
+        "k",
+        PoolType.POOL_ONE,
+        tally=Tally(
+            0,
+            3,
+            1,
+            king_score_mean=0.50,
+            challenger_score_mean=0.54,
+            score_mean_delta=0.04,
+            score_mean_rounds=4,
+            king_total_tokens=1000,
+            challenger_total_tokens=800,
+            token_comparison_rounds=4,
+            king_token_savings_mean=0.10,
+            challenger_token_savings_mean=0.20,
+            king_token_boost=0.01,
+            challenger_token_boost=0.02,
+        ),
+        pool_target=4,
+    )
+    assert (
+        await db.close_challenge(
+            challenge,
+            DuelOutcome.KING_WON,
+            scoring_method=DuelScoringMethod.MEAN,
+            round_win_margin=1,
+            mean_score_margin=0.075,
+            token_efficiency=TokenEfficiencyConfig(
+                enabled=True,
+                score_tolerance=0.04,
+                min_score=0.25,
+                bonus_multiplier=0.10,
+            ),
+        )
+        is True
+    )
     assert await _challenge_status(db) == int(ChallengeStatus.CLOSED)
     rows = await _resolutions(db)
     assert len(rows) == 1
     assert rows[0].pool_type == int(PoolType.POOL_ONE)
     assert rows[0].outcome == int(DuelOutcome.KING_WON)
-    assert (rows[0].challenger_wins, rows[0].challenger_losses, rows[0].ties) == (0, 3, 1)
+    assert (rows[0].challenger_wins, rows[0].challenger_losses, rows[0].ties) == (
+        0,
+        3,
+        1,
+    )
     assert rows[0].best_of == 4
     assert rows[0].scoring_method == "mean"
     assert rows[0].round_win_margin == 1
     assert rows[0].mean_score_margin == 0.075
+    assert rows[0].token_bonus_enabled is True
+    assert rows[0].king_total_tokens == 1000
+    assert rows[0].challenger_total_tokens == 800
+    assert rows[0].king_token_boost == 0.01
+    assert rows[0].challenger_token_boost == 0.02
+    assert rows[0].king_combined_score == 0.51
+    assert rows[0].challenger_combined_score == 0.56
+    assert rows[0].combined_score_delta == pytest.approx(0.05)
 
 
 async def test_promote_crowns_the_challenger_and_records(db: DuelResolverDb) -> None:

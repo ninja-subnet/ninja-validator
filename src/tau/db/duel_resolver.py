@@ -2,15 +2,21 @@
 
 from __future__ import annotations
 
-from sqlalchemy import Subquery, func, select, update
+from collections.abc import Mapping
+
+from sqlalchemy import Subquery, and_, func, select, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import aliased
 
 from tau.duel import (
     ActiveChallenge,
     ChallengeSnapshot,
     DuelScoringMethod,
     Tally,
+    TokenEfficiencyConfig,
+    TokenEfficiencyRound,
+    calculate_token_efficiency,
 )
 from tau.pools import PoolTargets
 
@@ -31,7 +37,12 @@ class DuelResolverDb:
     async def aclose(self) -> None:
         await self._engine.dispose()
 
-    async def snapshot(self, targets: PoolTargets) -> ChallengeSnapshot:
+    async def snapshot(
+        self,
+        targets: PoolTargets,
+        *,
+        token_efficiency: TokenEfficiencyConfig | None = None,
+    ) -> ChallengeSnapshot:
         """Read the arena state `decide` needs, in one transaction.
 
         With no reigning king the snapshot is empty (the worker waits). The next
@@ -42,7 +53,12 @@ class DuelResolverDb:
             king_id = await self._reigning_king(session)
             if king_id is None:
                 return ChallengeSnapshot(None, None, None, task_pools_ready=False)
-            active = await self._active_challenge(session, king_id, targets)
+            active = await self._active_challenge(
+                session,
+                king_id,
+                targets,
+                token_efficiency or TokenEfficiencyConfig(),
+            )
             if active is not None:
                 return ChallengeSnapshot(king_id, active, None)
             task_pools_ready = await self._task_pools_ready(session, king_id, targets)
@@ -84,6 +100,7 @@ class DuelResolverDb:
         scoring_method: DuelScoringMethod,
         round_win_margin: int,
         mean_score_margin: float,
+        token_efficiency: TokenEfficiencyConfig | None = None,
     ) -> bool:
         """POOL_ONE -> POOL_TWO (challenger won pool 1), recording the verdict, only if
         still in the pool the snapshot observed."""
@@ -97,6 +114,7 @@ class DuelResolverDb:
                 scoring_method,
                 round_win_margin,
                 mean_score_margin,
+                token_efficiency or TokenEfficiencyConfig(),
             )
             return True
 
@@ -108,6 +126,7 @@ class DuelResolverDb:
         scoring_method: DuelScoringMethod,
         round_win_margin: int,
         mean_score_margin: float,
+        token_efficiency: TokenEfficiencyConfig | None = None,
     ) -> bool:
         """Close the challenge (king holds or challenger left), recording *outcome*,
         only if still in the observed pool."""
@@ -121,6 +140,7 @@ class DuelResolverDb:
                 scoring_method,
                 round_win_margin,
                 mean_score_margin,
+                token_efficiency or TokenEfficiencyConfig(),
             )
             return True
 
@@ -131,6 +151,7 @@ class DuelResolverDb:
         scoring_method: DuelScoringMethod,
         round_win_margin: int,
         mean_score_margin: float,
+        token_efficiency: TokenEfficiencyConfig | None = None,
     ) -> bool:
         """Crown the challenger and close the challenge (challenger won pool 2), in one
         transaction.
@@ -149,6 +170,7 @@ class DuelResolverDb:
                 scoring_method,
                 round_win_margin,
                 mean_score_margin,
+                token_efficiency or TokenEfficiencyConfig(),
             )
             await session.execute(
                 insert(models.King)
@@ -185,9 +207,17 @@ class DuelResolverDb:
         scoring_method: DuelScoringMethod,
         round_win_margin: int,
         mean_score_margin: float,
+        token_efficiency: TokenEfficiencyConfig,
     ) -> None:
         """Append the pool's verdict to ``duel_resolutions`` with the tally and
         thresholds it was decided on. Idempotent: one row per (challenge, pool)."""
+        token_bonus_applied = (
+            token_efficiency.enabled and scoring_method is DuelScoringMethod.MEAN
+        )
+        king_boost = challenge.tally.king_token_boost if token_bonus_applied else 0.0
+        challenger_boost = (
+            challenge.tally.challenger_token_boost if token_bonus_applied else 0.0
+        )
         await session.execute(
             insert(models.DuelResolution)
             .values(
@@ -205,6 +235,32 @@ class DuelResolverDb:
                 challenger_score_mean=challenge.tally.challenger_score_mean,
                 score_mean_delta=challenge.tally.score_mean_delta,
                 score_mean_rounds=challenge.tally.score_mean_rounds,
+                token_bonus_enabled=token_bonus_applied,
+                token_score_tolerance=token_efficiency.score_tolerance,
+                token_min_score=token_efficiency.min_score,
+                token_bonus_multiplier=token_efficiency.bonus_multiplier,
+                king_total_tokens=challenge.tally.king_total_tokens,
+                challenger_total_tokens=challenge.tally.challenger_total_tokens,
+                token_comparison_rounds=challenge.tally.token_comparison_rounds,
+                king_token_savings_mean=(
+                    challenge.tally.king_token_savings_mean
+                    if token_bonus_applied
+                    else 0.0
+                ),
+                challenger_token_savings_mean=(
+                    challenge.tally.challenger_token_savings_mean
+                    if token_bonus_applied
+                    else 0.0
+                ),
+                king_token_boost=king_boost,
+                challenger_token_boost=challenger_boost,
+                king_combined_score=challenge.tally.king_score_mean + king_boost,
+                challenger_combined_score=(
+                    challenge.tally.challenger_score_mean + challenger_boost
+                ),
+                combined_score_delta=(
+                    challenge.tally.score_mean_delta + challenger_boost - king_boost
+                ),
             )
             .on_conflict_do_nothing(
                 index_elements=["challenger_submission_id", "pool_type"]
@@ -240,7 +296,11 @@ class DuelResolverDb:
         )
 
     async def _active_challenge(
-        self, session: AsyncSession, king_id: str, targets: PoolTargets
+        self,
+        session: AsyncSession,
+        king_id: str,
+        targets: PoolTargets,
+        token_efficiency: TokenEfficiencyConfig,
     ) -> ActiveChallenge | None:
         """The challenge dueling *king_id* (status POOL_ONE/POOL_TWO), or None.
 
@@ -268,14 +328,27 @@ class DuelResolverDb:
             king_submission_id=king_id,
             pool=pool,
             pool_target=targets.target(pool),
-            tally=await self._tally(session, king_id, challenger_id, pool),
+            tally=await self._tally(
+                session,
+                king_id,
+                challenger_id,
+                pool,
+                targets.target(pool),
+                token_efficiency,
+            ),
             challenger_registered=await self._challenger_registered(
                 session, challenger_id
             ),
         )
 
     async def _tally(
-        self, session: AsyncSession, king_id: str, challenger_id: str, pool: PoolType
+        self,
+        session: AsyncSession,
+        king_id: str,
+        challenger_id: str,
+        pool: PoolType,
+        pool_target: int,
+        token_efficiency: TokenEfficiencyConfig,
     ) -> Tally:
         """Challenger-perspective outcomes and score means over the active pool."""
         conditions = (
@@ -293,25 +366,82 @@ class DuelResolverDb:
         counts = {
             winner: count for winner, count in (await session.execute(stmt)).all()
         }
-        score_stmt = (
+        king_solution = aliased(models.DuelTaskSolution)
+        challenger_solution = aliased(models.DuelTaskSolution)
+        round_stmt = (
             select(
-                func.avg(models.Judgement.king_score),
-                func.avg(models.Judgement.challenger_score),
-                func.count(),
+                models.Judgement.king_score,
+                models.Judgement.challenger_score,
+                models.Judgement.error,
+                king_solution.usage_summary["total_tokens"].label("king_tokens"),
+                challenger_solution.usage_summary["total_tokens"].label(
+                    "challenger_tokens"
+                ),
             )
             .join(models.Task, models.Task.task_id == models.Judgement.task_id)
-            .where(
-                *conditions,
-                models.Judgement.king_score.is_not(None),
-                models.Judgement.challenger_score.is_not(None),
+            .outerjoin(
+                king_solution,
+                and_(
+                    king_solution.task_id == models.Judgement.task_id,
+                    king_solution.challenger_submission_id == challenger_id,
+                    king_solution.submission_id == king_id,
+                ),
             )
+            .outerjoin(
+                challenger_solution,
+                and_(
+                    challenger_solution.task_id == models.Judgement.task_id,
+                    challenger_solution.challenger_submission_id == challenger_id,
+                    challenger_solution.submission_id == challenger_id,
+                ),
+            )
+            .where(*conditions)
         )
-        king_mean, challenger_mean, score_count = (await session.execute(score_stmt)).one()
-        scored = int(score_count or 0)
-        king_score_mean = float(king_mean) if scored else 0.0
-        challenger_score_mean = float(challenger_mean) if scored else 0.0
-        # Anything that is not a decisive king/challenger win is a tie (including a
-        # judge-failure tie); the resolver never reads judgements.error.
+        round_rows = (await session.execute(round_stmt)).all()
+        scored_rows = [
+            (float(row.king_score), float(row.challenger_score))
+            for row in round_rows
+            if row.king_score is not None and row.challenger_score is not None
+        ]
+        scored = len(scored_rows)
+        king_score_mean = (
+            sum(king_score for king_score, _ in scored_rows) / scored if scored else 0.0
+        )
+        challenger_score_mean = (
+            sum(challenger_score for _, challenger_score in scored_rows) / scored
+            if scored
+            else 0.0
+        )
+        token_stats = calculate_token_efficiency(
+            (
+                TokenEfficiencyRound(
+                    king_score=(
+                        float(row.king_score) if row.king_score is not None else None
+                    ),
+                    challenger_score=(
+                        float(row.challenger_score)
+                        if row.challenger_score is not None
+                        else None
+                    ),
+                    king_tokens=_usage_total_tokens(row.king_tokens),
+                    challenger_tokens=_usage_total_tokens(row.challenger_tokens),
+                    judgement_valid=row.error is None,
+                )
+                for row in round_rows
+            ),
+            pool_target=pool_target,
+            config=token_efficiency,
+        )
+        king_total_tokens, challenger_total_tokens = await self._pool_token_totals(
+            session,
+            king_id=king_id,
+            challenger_id=challenger_id,
+            pool=pool,
+            minimum_rows=sum(counts.values()),
+        )
+        # Anything that is not a decisive king/challenger win remains a tally tie.
+        # Judge-failure fallback scores still preserve the existing quality mean,
+        # but cannot create a token bonus.
         return Tally(
             wins=counts.get("challenger", 0),
             losses=counts.get("king", 0),
@@ -324,7 +454,67 @@ class DuelResolverDb:
             challenger_score_mean=challenger_score_mean,
             score_mean_delta=challenger_score_mean - king_score_mean,
             score_mean_rounds=scored,
+            king_total_tokens=king_total_tokens,
+            challenger_total_tokens=challenger_total_tokens,
+            token_comparison_rounds=token_stats.token_comparison_rounds,
+            king_token_savings_mean=token_stats.king_savings_mean,
+            challenger_token_savings_mean=token_stats.challenger_savings_mean,
+            king_token_boost=token_stats.king_boost,
+            challenger_token_boost=token_stats.challenger_boost,
         )
+
+    async def _pool_token_totals(
+        self,
+        session: AsyncSession,
+        *,
+        king_id: str,
+        challenger_id: str,
+        pool: PoolType,
+        minimum_rows: int,
+    ) -> tuple[int | None, int | None]:
+        """Total all solves run in the pool, including solves not yet judged.
+
+        A missing usage value makes that side unavailable instead of exposing a
+        partial sum. ``minimum_rows`` also protects older/incomplete data where a
+        judgement exists without its challenge-scoped solution row.
+        """
+        rows = (
+            await session.execute(
+                select(
+                    models.DuelTaskSolution.submission_id,
+                    models.DuelTaskSolution.usage_summary["total_tokens"].label(
+                        "total_tokens"
+                    ),
+                )
+                .join(
+                    models.Task,
+                    models.Task.task_id == models.DuelTaskSolution.task_id,
+                )
+                .where(
+                    models.Task.king_id == king_id,
+                    models.Task.pool_type == int(pool),
+                    models.DuelTaskSolution.challenger_submission_id == challenger_id,
+                    models.DuelTaskSolution.submission_id.in_((king_id, challenger_id)),
+                )
+            )
+        ).all()
+        totals = {king_id: 0, challenger_id: 0}
+        counts = {king_id: 0, challenger_id: 0}
+        complete = {king_id: True, challenger_id: True}
+        for submission_id, value in rows:
+            counts[submission_id] += 1
+            tokens = _usage_total_tokens(value)
+            if tokens is None:
+                complete[submission_id] = False
+            else:
+                totals[submission_id] += tokens
+
+        def total(submission_id: str) -> int | None:
+            if counts[submission_id] < minimum_rows or not complete[submission_id]:
+                return None
+            return totals[submission_id]
+
+        return total(king_id), total(challenger_id)
 
     async def _challenger_registered(
         self, session: AsyncSession, challenger_id: str
@@ -377,3 +567,12 @@ def _current_metagraph() -> Subquery:
         .order_by(models.Registration.uid, models.Registration.block.desc())
         .subquery()
     )
+
+
+def _usage_total_tokens(value: object) -> int | None:
+    """Accept a sanitized non-negative JSON scalar and reject legacy bad values."""
+    if isinstance(value, Mapping):
+        value = value.get("total_tokens")
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        return None
+    return value

@@ -11,7 +11,7 @@ def challenger_wins(wins: int, losses: int, margin: int) -> bool:
 def challenger_wins_by_mean_score(
     *, score_mean_delta: float, score_mean_rounds: int, margin: float
 ) -> bool:
-    """True when the challenger's raw mean score clears the configured margin."""
+    """True when the challenger's score delta clears the configured margin."""
     return score_mean_rounds > 0 and score_mean_delta >= margin
 
 

@@ -90,7 +90,7 @@ def decide_with_mean_scoring_method(
         return Nothing(WaitReason.DUEL_IN_PROGRESS)
 
     if not challenger_wins_by_mean_score(
-        score_mean_delta=tally.score_mean_delta,
+        score_mean_delta=tally.combined_score_delta,
         score_mean_rounds=tally.score_mean_rounds,
         margin=mean_score_margin,
     ):

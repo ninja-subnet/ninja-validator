@@ -210,6 +210,36 @@ class DuelResolution(Base):
     challenger_score_mean: Mapped[float] = mapped_column(Float, nullable=False)
     score_mean_delta: Mapped[float] = mapped_column(Float, nullable=False)
     score_mean_rounds: Mapped[int] = mapped_column(Integer, nullable=False)
+    # Token modifier inputs/results. Historical rows have unknown token totals and
+    # settings; all new resolver writes fill every field explicitly.
+    token_bonus_enabled: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default="false"
+    )
+    token_score_tolerance: Mapped[float | None] = mapped_column(Float)
+    token_min_score: Mapped[float | None] = mapped_column(Float)
+    token_bonus_multiplier: Mapped[float | None] = mapped_column(Float)
+    king_total_tokens: Mapped[int | None] = mapped_column(BigInteger)
+    challenger_total_tokens: Mapped[int | None] = mapped_column(BigInteger)
+    token_comparison_rounds: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default="0"
+    )
+    king_token_savings_mean: Mapped[float] = mapped_column(
+        Float, nullable=False, server_default="0"
+    )
+    challenger_token_savings_mean: Mapped[float] = mapped_column(
+        Float, nullable=False, server_default="0"
+    )
+    king_token_boost: Mapped[float] = mapped_column(
+        Float, nullable=False, server_default="0"
+    )
+    challenger_token_boost: Mapped[float] = mapped_column(
+        Float, nullable=False, server_default="0"
+    )
+    # Nullable during rollout so an old resolver can keep writing after the schema
+    # migration. The new resolver always fills these; readers fall back to raw score.
+    king_combined_score: Mapped[float | None] = mapped_column(Float)
+    challenger_combined_score: Mapped[float | None] = mapped_column(Float)
+    combined_score_delta: Mapped[float | None] = mapped_column(Float)
     # When the verdict was reached (UTC); inserting the row is the decision moment.
     created_at: Mapped[dt.datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()

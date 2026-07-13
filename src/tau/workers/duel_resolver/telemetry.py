@@ -107,6 +107,18 @@ def _challenge_fields(challenge: ActiveChallenge) -> dict[str, object]:
         "challenger_score_mean": challenge.tally.challenger_score_mean,
         "score_mean_delta": challenge.tally.score_mean_delta,
         "score_mean_rounds": challenge.tally.score_mean_rounds,
+        "king_total_tokens": challenge.tally.king_total_tokens,
+        "challenger_total_tokens": challenge.tally.challenger_total_tokens,
+        "token_comparison_rounds": challenge.tally.token_comparison_rounds,
+        "king_token_savings_mean": challenge.tally.king_token_savings_mean,
+        "challenger_token_savings_mean": (
+            challenge.tally.challenger_token_savings_mean
+        ),
+        "king_token_boost": challenge.tally.king_token_boost,
+        "challenger_token_boost": challenge.tally.challenger_token_boost,
+        "king_combined_score": challenge.tally.king_combined_score,
+        "challenger_combined_score": challenge.tally.challenger_combined_score,
+        "combined_score_delta": challenge.tally.combined_score_delta,
     }
 
 
@@ -116,4 +128,8 @@ def _config_fields(config: DuelResolverConfig) -> dict[str, object]:
         "scoring_method": config.scoring_method.value,
         "round_win_margin": config.round_win_margin,
         "mean_score_margin": config.mean_score_margin,
+        "token_bonus_enabled": config.token_efficiency.enabled,
+        "token_score_tolerance": config.token_score_tolerance,
+        "token_min_score": config.token_min_score,
+        "token_bonus_multiplier": config.token_bonus_multiplier,
     }

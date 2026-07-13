@@ -344,13 +344,17 @@ against races even though it never holds locks across ticks.
   `INSERT challenges status = POOL_ONE (1)`.
 - **Advances / promotes / closes** by updating `challenges.status` to
   `POOL_TWO (2)` or `CLOSED (0)`, and appending a `duel_resolutions` row that
-  snapshots the tally, `best_of`, `win_margin`, and `outcome`.
+  snapshots the tally, raw quality, token boosts, merged scores, token totals,
+  configured margins, and `outcome`.
 - **Crowns** a new king on a POOL_TWO win by inserting into `kings`
   (`ON CONFLICT DO NOTHING`).
 - **Drains safely:** `SIGUSR1` lets the active duel finish but blocks the next
   challenge; `SIGUSR2` resumes opening challenges.
-- Config: `TAU_DUEL_WIN_MARGIN` (default `0`), `TAU_DUEL_POLL_SECONDS`
-  (default `5`).
+- In mean mode, token efficiency modifies both sides symmetrically. On each task,
+  a side can earn `1 - its tokens / the other side's tokens` when its score is at
+  least the configured minimum and within the configured tolerance. The average
+  saving over the full pool is multiplied by the bonus multiplier and added to
+  that side's raw mean. The one final margin gate compares the merged scores.
 
 ---
 
@@ -679,7 +683,11 @@ authoritative, commented list). Grouped by concern:
 | `TAU_POOL_TWO_TARGET` | `50` | Tasks to maintain in pool 2 for the king. |
 | `TAU_DUEL_SCORING_METHOD` | `round_wins` code fallback; `mean` in `.env.example` | Resolve each completed pool by round wins or mean score. |
 | `TAU_DUEL_ROUND_WIN_MARGIN` | `0` | Extra margin in the rule `wins > losses + margin`. |
-| `TAU_DUEL_MEAN_SCORE_MARGIN` | `0.05` code fallback; `0.10` in `.env.example` | In mean mode, the challenger's mean score must exceed the king's by this amount. |
+| `TAU_DUEL_MEAN_SCORE_MARGIN` | `0.10` | In mean mode, the challenger's merged score must exceed the king's merged score by this amount. |
+| `TAU_DUEL_TOKEN_BONUS_ENABLED` | `false` code fallback; `true` in `.env.example` | Enable the symmetric per-task token modifier in mean mode. |
+| `TAU_DUEL_TOKEN_SCORE_TOLERANCE` | `0.05` | A side can earn a task saving when its quality is no more than this far behind. |
+| `TAU_DUEL_TOKEN_MIN_SCORE` | `0.20` | Minimum task quality required before token savings may help that side. |
+| `TAU_DUEL_TOKEN_BONUS_MULTIPLIER` | `0.15` | Multiply the full-pool average token saving by this amount before adding it to quality. |
 | `TAU_DUEL_POLL_SECONDS` | `5` | duel-resolver poll interval. |
 | `TAU_PROMOTION_PUBLISH_REPO` | unset | Optional GitHub repository that receives a promoted king's bundle. |
 | `TAU_PROMOTION_PUBLISH_BRANCH` | `main` | Branch used for optional king publication. |
