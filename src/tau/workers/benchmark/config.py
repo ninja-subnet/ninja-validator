@@ -53,9 +53,17 @@ class BenchmarkConfig:
     # How long a single king's full benchmark may run before we give up this tick.
     bench_timeout_seconds: int = 6 * 60 * 60
     poll_seconds: float = 60.0
+    # Python interpreter to run the suite with. Empty = the suite's own
+    # <bench_repo_dir>/.venv (host runs). The containerized worker sets
+    # TAU_BENCH_VENV_PYTHON to its bootstrap venv (deploy/worker/
+    # benchmark-entrypoint.sh) because a host-built .venv's symlinks do not
+    # resolve inside the worker image.
+    venv_python_override: str = ""
 
     @property
     def bench_venv_python(self) -> Path:
+        if self.venv_python_override:
+            return Path(self.venv_python_override)
         return self.bench_repo_dir / ".venv" / "bin" / "python"
 
     @classmethod
@@ -76,4 +84,5 @@ class BenchmarkConfig:
             openrouter_api_key=env_str(env, "OPENROUTER_API_KEY", d.openrouter_api_key),
             bench_timeout_seconds=env_int(env, "TAU_BENCH_TIMEOUT_SECONDS", d.bench_timeout_seconds),
             poll_seconds=env_float(env, "TAU_BENCHMARK_POLL_SECONDS", d.poll_seconds),
+            venv_python_override=env_str(env, "TAU_BENCH_VENV_PYTHON", d.venv_python_override),
         )

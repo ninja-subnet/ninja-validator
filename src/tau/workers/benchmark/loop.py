@@ -113,6 +113,10 @@ def _benchmark_king(*, config: BenchmarkConfig, king: KingRow) -> None:
     # baseline-comparable config regardless of this process's environment.
     env = os.environ.copy()
     env["OPENROUTER_API_KEY"] = config.openrouter_api_key
+    # The suite's scripts re-exec each other via their repo .venv by default;
+    # BENCH_PYTHON pins them to the same interpreter we invoke (essential in the
+    # containerized worker, where the repo's host-built .venv is unusable).
+    env["BENCH_PYTHON"] = str(config.bench_venv_python)
     cmd = [
         str(config.bench_venv_python), config.runner_script,
         "--agent-dir", str(agent_dir),
