@@ -34,8 +34,18 @@ class BenchmarkConfig:
     bench_repo_dir: Path = Path("/root/subnet66/benchmark/ninja-benchmark--swe-bench-controller-2")
     # Suite entry point that benchmarks one agent from a path.
     runner_script: str = "run_agent_benchmark.py"
-    # Predefined benchmark parameters.
-    model: str = "qwen/qwen3-coder"
+    # Predefined benchmark parameters. Model + sampling mirror the published
+    # Qwen3.6-27B SWE-bench Pro baseline (temp=1.0, top_p=0.95, thinking mode) so
+    # per-king results are comparable to it; the suite injects these on every LLM
+    # call via its usage proxy.
+    model: str = "qwen/qwen3.6-27b"
+    temperature: float = 1.0
+    top_p: float = 0.95
+    # Extra sampling params forwarded verbatim to the suite's --sampling-json
+    # (empty = don't pass). Reasoning must be enabled explicitly: sampling knobs
+    # alone cannot turn thinking mode on. env_str treats a blank env var as unset,
+    # so to disable the default set TAU_BENCH_SAMPLING_JSON='{}' (a no-op merge).
+    sampling_json: str = '{"reasoning": {"enabled": true}}'
     slice_spec: str = "0:50"
     agent_workers: int = 4
     # OpenRouter key passed through to bench.py's environment.
@@ -58,6 +68,9 @@ class BenchmarkConfig:
             bench_repo_dir=Path(env_str(env, "TAU_BENCH_REPO_DIR", str(d.bench_repo_dir))),
             runner_script=env_str(env, "TAU_BENCH_RUNNER_SCRIPT", d.runner_script),
             model=env_str(env, "TAU_BENCH_MODEL", d.model),
+            temperature=env_float(env, "TAU_BENCH_TEMPERATURE", d.temperature),
+            top_p=env_float(env, "TAU_BENCH_TOP_P", d.top_p),
+            sampling_json=env_str(env, "TAU_BENCH_SAMPLING_JSON", d.sampling_json),
             slice_spec=env_str(env, "TAU_BENCH_SLICE", d.slice_spec),
             agent_workers=env_int(env, "TAU_BENCH_WORKERS", d.agent_workers),
             openrouter_api_key=env_str(env, "OPENROUTER_API_KEY", d.openrouter_api_key),

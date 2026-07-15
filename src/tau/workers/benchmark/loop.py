@@ -30,7 +30,16 @@ from .db import BenchmarkDb, KingRow
 log = logging.getLogger(__name__)
 
 # Small artifacts copied from the benchmark run into the dedicated per-king folder.
-_ARCHIVE_FILES = ("summary.md", "cost_summary.json", "costs.jsonl", "eval_results.json")
+_ARCHIVE_FILES = (
+    "summary.md",
+    "cost_summary.json",
+    "costs.jsonl",
+    "eval_results.json",
+    # Baseline comparison (suite pipeline step 6): honest, CI-aware report vs the
+    # published Qwen3.6-27B score, with the comparability ledger.
+    "comparison.md",
+    "comparison.json",
+)
 _MARKER = "benchmark.json"
 
 
@@ -99,8 +108,9 @@ def _benchmark_king(*, config: BenchmarkConfig, king: KingRow) -> None:
 
     # Delegate to the suite's single-agent entry point. run_name = king_id so the suite
     # archives to <bench_repo>/results/<king_id>/, which we then copy into our dedicated
-    # folder. Sampling is picked up from the suite's config / BENCH_* env (which we pass
-    # through), so it stays comparable across kings.
+    # folder. Sampling is pinned EXPLICITLY per flag (highest precedence in the suite:
+    # agent-config `sampling:` < BENCH_* env < CLI) so every king runs the same
+    # baseline-comparable config regardless of this process's environment.
     env = os.environ.copy()
     env["OPENROUTER_API_KEY"] = config.openrouter_api_key
     cmd = [
@@ -110,7 +120,11 @@ def _benchmark_king(*, config: BenchmarkConfig, king: KingRow) -> None:
         "--model", config.model,
         "--slice", config.slice_spec,
         "--workers", str(config.agent_workers),
+        "--temperature", str(config.temperature),
+        "--top-p", str(config.top_p),
     ]
+    if config.sampling_json:
+        cmd += ["--sampling-json", config.sampling_json]
     log.info("benchmarking king %s (agent=%s, model=%s, slice=%s)",
              king_id, agent_dir, config.model, config.slice_spec or "full")
 
@@ -144,6 +158,12 @@ def _archive_and_mark(*, config: BenchmarkConfig, king: KingRow, agent_dir: Path
             summary = json.loads((dest_dir / "cost_summary.json").read_text())
         except (json.JSONDecodeError, OSError):
             summary = {}
+    comparison: dict = {}
+    if (dest_dir / "comparison.json").is_file():
+        try:
+            comparison = json.loads((dest_dir / "comparison.json").read_text())
+        except (json.JSONDecodeError, OSError):
+            comparison = {}
 
     marker = {
         "king_id": king.king_id,
@@ -151,11 +171,17 @@ def _archive_and_mark(*, config: BenchmarkConfig, king: KingRow, agent_dir: Path
         "run_name": king.king_id,
         "agent_dir": str(agent_dir),
         "model": config.model,
+        "sampling": {"temperature": config.temperature, "top_p": config.top_p,
+                     "sampling_json": config.sampling_json or None},
         "slice": config.slice_spec,
         "instances": summary.get("instances"),
         "resolved": summary.get("resolved"),
         "resolve_rate": summary.get("resolve_rate"),
         "total_cost_usd": summary.get("total_cost_usd"),
+        # Headline of the suite's baseline comparison (comparison.json), if produced.
+        "resolve_rate_ci95_pct": comparison.get("resolve_rate_ci95_pct"),
+        "baseline": comparison.get("baseline"),
+        "baseline_verdict": comparison.get("verdict"),
         "status": "done",
     }
     (dest_dir / _MARKER).write_text(json.dumps(marker, indent=2))
