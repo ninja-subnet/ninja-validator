@@ -298,6 +298,76 @@ services:
         condition: service_completed_successfully
     restart: unless-stopped
 
+  # Benchmark worker: watch the `kings` table and benchmark each new king's
+  # submitted agent against SWE-bench Pro by shelling out to the benchmark suite
+  # (run_agent_benchmark.py in the host checkout mounted at TAU_BENCH_ROOT).
+  #
+  # ISOLATION — this service can fail without touching the rest of the stack:
+  #   * same image recipe as every other worker (EXTRA/WORKER args only), so it
+  #     adds no new build-failure mode to `docker compose up`;
+  #   * nothing depends_on it (leaf service); its own crashes only restart itself;
+  #   * all benchmark-specific bootstrap (suite venv, docker CLI, dataset cache)
+  #     happens at runtime in benchmark-entrypoint.sh with an in-process retry
+  #     loop — a missing mount or network failure means THIS container idles and
+  #     retries, not a compose-level error;
+  #   * resource-limited so a runaway pipeline cannot starve the other workers
+  #     (the heavy sweap/eval containers run on the host daemon, outside this
+  #     container's cgroup).
+  #
+  # NETWORKING — host mode is required: the suite starts a per-instance UsageProxy
+  # that sibling sweap containers reach at the host gateway (host.docker.internal
+  # -> 172.17.0.1). With host networking the proxy binds the host net exactly as
+  # when the suite runs on the host, and the same firewall rule applies (allow
+  # docker0 -> BENCH_PROXY_PORT_RANGE, see the suite's .env.example). No compose
+  # DNS in host mode, hence DATABASE_URL via 127.0.0.1:${POSTGRES_PORT}.
+  #
+  # MOUNTS — docker-out-of-docker: bind-mount sources are resolved by the HOST
+  # daemon, so the suite checkout and submissions must be mounted at the SAME
+  # path inside the container as on the host.
+  benchmark-worker:
+    build:
+      context: .
+      dockerfile: deploy/worker/Dockerfile
+      args:
+        EXTRA: benchmark
+        WORKER: benchmark-worker
+    container_name: pg_stack_benchmark_worker
+    env_file: .env
+    network_mode: host
+    environment:
+      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@127.0.0.1:${POSTGRES_PORT:-5432}/${POSTGRES_DB}
+      TAU_SUBMISSIONS_DIR: ${TAU_SUBMISSIONS_DIR:-/srv/tau/submissions}
+      TAU_BENCH_REPO_DIR: ${TAU_BENCH_REPO_DIR:-${TAU_BENCH_ROOT:-/root/subnet66/benchmark}/ninja-benchmark--swe-bench-controller-2}
+      TAU_BENCHMARK_RESULTS_DIR: ${TAU_BENCHMARK_RESULTS_DIR:-/srv/tau/benchmark_results}
+    volumes:
+      # docker-out-of-docker: sweap + eval containers run on the host daemon.
+      - /var/run/docker.sock:/var/run/docker.sock
+      # Extracted miner submissions, read-only, SAME path as the task-solver uses.
+      - ${TAU_SUBMISSIONS_DIR:-/srv/tau/submissions}:${TAU_SUBMISSIONS_DIR:-/srv/tau/submissions}:ro
+      # The benchmark directory (suite + mini-swe-agent checkouts), SAME path,
+      # writable: the suite writes swebench-results/, swebench-eval/ and results/
+      # inside its own checkout — the same directories as a host run.
+      - ${TAU_BENCH_ROOT:-/root/subnet66/benchmark}:${TAU_BENCH_ROOT:-/root/subnet66/benchmark}
+      # Per-king results + benchmark.json markers, SAME path, writable.
+      - ${TAU_BENCHMARK_RESULTS_DIR:-/srv/tau/benchmark_results}:${TAU_BENCHMARK_RESULTS_DIR:-/srv/tau/benchmark_results}
+      # Container-side bootstrap venv + docker CLI + HF dataset cache (persistent).
+      - bench-venv:/opt/bench-venv
+      - ./deploy/worker/benchmark-entrypoint.sh:/usr/local/bin/benchmark-entrypoint.sh:ro
+    command: ["sh", "/usr/local/bin/benchmark-entrypoint.sh"]
+    deploy:
+      resources:
+        limits:
+          cpus: "2.0"
+          memory: 4G
+    depends_on:
+      db:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    restart: unless-stopped
+
 volumes:
   pgdata:
+    driver: local
+  bench-venv:
     driver: local
