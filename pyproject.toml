@@ -30,6 +30,7 @@ duel-resolver = []
 qualification = []
 weight-setter = []
 task-solver = []
+benchmark = []
 
 [project.scripts]
 # Worker entrypoints: each maps to tau.workers.<name>:main. The deploy/worker
@@ -44,6 +45,7 @@ duel-resolver = "tau.workers.duel_resolver:main"
 task-solver = "tau.workers.task_solver:main"
 weight-setter = "tau.workers.weight_setter:main"
 tau-prune-disabled-upstreams = "tau.proxy.env_prune:main"
+benchmark-worker = "tau.workers.benchmark:main"
 
 [build-system]
 requires = ["uv_build>=0.11.3,<0.12.0"]
