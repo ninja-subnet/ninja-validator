@@ -2,13 +2,19 @@
 flowchart LR
     chain["Bittensor<br/>Subnet 66"]
     gh["GitHub<br/>commits"]
+    site["ninja66.ai<br/>public API"]
+    bench_out["SWE-bench Pro<br/>per-king scores"]
 
     cw(["chain-watcher"])
+    ql(["qualification<br/>LLM security review"])
     tg(["task-generator"])
     ts(["task-solver<br/>runs agents in sandboxes"])
     sc(["task-screener<br/>shadow / enforce score"])
     jd(["judge"])
     dr(["duel-resolver"])
+    ws(["weight-setter"])
+    dash(["dashboard"])
+    bm(["benchmark-worker<br/>optional, host-run"])
 
     subm[("submissions +<br/>registrations")]
     tasks[("tasks<br/>= CANDIDATE")]
@@ -19,6 +25,8 @@ flowchart LR
     reign[("kings + challenges<br/>+ duel_resolutions")]
 
     chain --> cw --> subm
+    subm -->|"UNVERIFIED bundle"| ql
+    ql -->|"security pass → ELIGIBLE"| subm
     subm --> tg
     gh --> tg
     tg -->|"mine + describe commits"| tasks
@@ -32,12 +40,19 @@ flowchart LR
     solutions --> jd
     jd -->|"blinded pairwise<br/>LLM comparison"| judg
     judg --> dr
+    subm -.->|"ELIGIBLE challenger"| dr
     dr -->|"tally per pool;<br/>crown / defend"| reign
     reign -.->|"new king → fresh task pools<br/>(king-of-the-hill loop)"| tg
+    reign --> ws
+    ws -->|"emission across<br/>rolling king window"| chain
+    reign --> dash --> site
+    reign --> bm --> bench_out
 
     classDef worker fill:#2563eb,stroke:#1e3a8a,color:#fff;
     classDef store fill:#f59e0b,stroke:#b45309,color:#111;
     classDef ext fill:#e5e7eb,stroke:#6b7280,color:#111;
-    class cw,tg,ts,sc,jd,dr worker;
+    classDef optional fill:#60a5fa,stroke:#1e3a8a,color:#111,stroke-dasharray:5 3;
+    class cw,ql,tg,ts,sc,jd,dr,ws,dash worker;
+    class bm optional;
     class subm,tasks,screening,qualified,solutions,judg,reign store;
-    class chain,gh ext;
+    class chain,gh,site,bench_out ext;

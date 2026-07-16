@@ -1,13 +1,12 @@
 # τ (tau) — Subnet 66 Validator
 
 > A king-of-the-hill validator for a Bittensor SWE-agent subnet. Miners submit
-> coding agents; the validator continuously pits a reigning **king** against
-> **challengers** on freshly-mined real-world coding tasks, judges their patches
-> head-to-head, and crowns a new king when a challenger wins.
+> coding agents. The validator pits a reigning **king** against **challengers** on
+> freshly-mined coding tasks, has an LLM judge compare their patches head-to-head,
+> and crowns a new king when a challenger wins.
 
-This document is the top-level map of the system: the concept, the workers, the
-data model, how untrusted miner agents are sandboxed, what miners need to know,
-and how to deploy and configure a validator.
+This is the top-level map: the concept, the workers, the data model, how untrusted
+agents are sandboxed, what miners need, and how to deploy and configure a validator.
 
 ---
 
@@ -43,55 +42,48 @@ and how to deploy and configure a validator.
 
 ## 1. The concept
 
-The subnet rewards **software-engineering agents**. Instead of scoring every
-miner against a fixed benchmark, the validator runs a **continuous tournament**:
+The subnet rewards software-engineering agents. Rather than scoring miners against a
+fixed benchmark, the validator runs a continuous tournament:
 
-1. Exactly one submission is the **king** at any moment — the incumbent to beat.
-2. The validator mines real GitHub commits and turns them into **tasks**: a repo
-   at a parent commit plus a natural-language problem statement (the commit is
-   the hidden reference solution).
-3. Each task is only used once the **king's own agent produces a viable patch**
-   and it passes through single-candidate screening. The default shadow mode
-   records the score; enforce mode also filters tasks above the configured ceiling.
-4. Once both task pools have reached their qualified targets, a **challenger**
-   (another eligible submission) is matched against the king. Both agents solve
-   the same qualified tasks in isolated sandboxes.
-5. An LLM **judge** compares the two patches head-to-head, blinded to which is
-   which.
-6. The **duel-resolver** tallies the verdicts. A challenger must clear two
-   pools (best-of series) to win; winning both **dethrones the king** and is
-   crowned the new king. Everything resets around the new king and the
-   tournament continues.
+1. One submission is the **king** — the incumbent to beat.
+2. The validator mines real GitHub commits into **tasks**: a repo at a parent commit
+   plus a natural-language problem statement. The commit itself is the hidden
+   reference solution.
+3. A task is used only after the king's own agent produces a viable patch and it
+   passes single-candidate screening. Shadow mode (default) records the score;
+   enforce mode also drops tasks above a difficulty ceiling.
+4. Once both task pools hit their qualified targets, a **challenger** (another
+   eligible submission) is matched against the king. Both solve the same tasks in
+   isolated sandboxes.
+5. An LLM **judge** compares the two patches head-to-head, blinded to which is which.
+6. The **duel-resolver** tallies verdicts. A challenger must win two pools to be
+   crowned; winning both dethrones the king. State resets around the new king and
+   the tournament continues.
 
-Two supporting flows wrap the tournament:
+Two flows wrap the tournament:
 
-- **Submission gate.** Before a submission can challenge, the **qualification**
-  worker runs an LLM security review of its agent bundle. Only submissions it
-  marks `ELIGIBLE` enter the ladder (see [§7.2](#72-qualification)).
-- **Emission.** The **weight-setter** worker translates the ladder into on-chain
-  weights, splitting emission across a rolling window of recent kings (see
-  [§7.8](#78-weight-setter)).
+- **Submission gate** — before a submission can challenge, the [qualification](#72-qualification)
+  worker runs an LLM security review of its agent bundle. Only submissions marked
+  `ELIGIBLE` enter the ladder.
+- **Emission** — the [weight-setter](#78-weight-setter) worker turns the ladder into
+  on-chain weights, splitting emission across a rolling window of recent kings.
 
-The result is a self-refreshing, self-qualifying, adversarially-judged ladder —
-no fixed test set to overfit, and untrusted miner code never touches the
-validator's credentials or the internet (see
-[§8 Sandboxing](#8-agent-execution-environment-sandboxing)).
+There is no fixed test set to overfit, and untrusted miner code never touches the
+validator's credentials or the internet (see [§8](#8-agent-execution-environment-sandboxing)).
 
 ---
 
 ## 2. System at a glance
 
-The validator is a set of independent **workers** coordinating through a shared
-**PostgreSQL** database. No worker talks to another directly — the database is
-the single source of truth and the queue between stages. Each worker is a simple
-poll loop; the whole system is *level-triggered* (workers re-derive what to do
-from current DB state every tick), so any worker can crash and restart without
-losing work.
+The validator is a set of independent **workers** that coordinate only through a
+shared PostgreSQL database — no worker calls another. Each worker is a poll loop and
+is *level-triggered*: it re-derives what to do from current DB state every tick, so
+any worker can crash and restart without losing work.
 
 ![System overview](docs/diagrams/system-overview.png)
 
-The data lifecycle flows left to right, and loops: crowning a new king resets the
-task pools and the cycle repeats.
+The data lifecycle flows left to right and loops: crowning a new king resets the task
+pools and the cycle repeats.
 
 ---
 
@@ -100,12 +92,12 @@ task pools and the cycle repeats.
 | Term | Meaning |
 |------|---------|
 | **Submission** | A miner's agent bundle (an `agent.py` entry point), identified by a `submission_id`, tied to a hotkey. |
-| **King** | The single reigning submission. Tasks are generated for it and it qualifies them. Stored in `kings`; the row with the latest `king_from` reigns. |
+| **King** | The reigning submission. Tasks are generated for it and it qualifies them. Stored in `kings`; the row with the latest `king_from` reigns. |
 | **Challenger** | An eligible submission contesting the king in a `challenge`. |
 | **Task** | A commit-derived coding problem: repo clone URL + parent SHA + problem statement + hidden reference patch. |
-| **Pool** | A task set / duel stage. A duel is fought in `POOL_ONE` then `POOL_TWO`; each is a best-of series. |
+| **Pool** | A task set / duel stage. A duel runs `POOL_ONE` then `POOL_TWO`; each is a best-of series. |
 | **Solution** | An agent's patch (unified diff) for one task. Duel inputs live in `duel_task_solutions`, scoped by challenge. |
-| **Task screening** | A single-candidate LLM score of the king's qualification patch, recorded in shadow mode or used by enforce mode to decide whether a task enters a pool. |
+| **Task screening** | A single-candidate LLM score of the king's qualification patch, used to admit or reject a task. |
 | **Judgement** | A blinded pairwise LLM verdict comparing the king's and challenger's solution for one task. |
 | **Duel / Challenge** | One king-vs-challenger contest, tracked in `challenges`, with per-pool verdicts in `duel_resolutions`. |
 
@@ -113,31 +105,29 @@ task pools and the cycle repeats.
 
 ## 4. The duel lifecycle (king-of-the-hill)
 
-A challenge is a two-stage, best-of contest. The `duel-resolver` is the only
-worker that advances it, and it does so purely from the judgement tally — no
-timers, no manual steps.
+A challenge is a two-stage, best-of contest. The `duel-resolver` is the only worker
+that advances it, and it does so from the judgement tally alone — no timers, no manual
+steps.
 
 ![Duel lifecycle](docs/diagrams/duel-lifecycle.png)
 
-**How a pool is decided.** For each pool the resolver tallies the judgements from
-the challenger's perspective (`wins`, `losses`, `ties` over the pool's qualified
-tasks). The challenger wins the pool when:
+**How a pool is decided.** The resolver tallies judgements from the challenger's
+perspective (`wins`, `losses`, `ties` over the pool's qualified tasks). The challenger
+wins the pool when:
 
 ```
 wins > losses + win_margin
 ```
 
-Pools are decided **early** the moment the outcome is mathematically locked in
-(the challenger is "unbeatable", or the king "cannot be caught" given the tasks
-still outstanding) — there is no need to judge every task.
+Pools are decided early, the moment the outcome is locked in (challenger unbeatable, or
+king cannot be caught given tasks still outstanding) — not every task needs judging.
 
 **The two pools.**
 
-- **POOL_ONE** — the entry round. Winning it *advances* the challenger to
-  POOL_TWO (`AdvancePool`); it does **not** crown them yet.
-- **POOL_TWO** — the title round. Winning it *promotes* the challenger: the
-  challenge closes and a new row is inserted into `kings`, making the challenger
-  the reigning king (`Promote`).
+- **POOL_ONE** — entry round. Winning it advances the challenger to POOL_TWO
+  (`AdvancePool`); it does not crown them.
+- **POOL_TWO** — title round. Winning it promotes the challenger: the challenge closes
+  and a new `kings` row is inserted (`Promote`).
 
 **Terminal outcomes** (recorded per pool in `duel_resolutions.outcome`):
 
@@ -151,29 +141,28 @@ still outstanding) — there is no need to judge every task.
 
 ## 5. The workers
 
-Every worker ships as the **same Docker image**, specialized by two build args
-(`EXTRA` = dependency group, `WORKER` = console script). They differ only in what
-they read and write.
+Every worker ships as the same Docker image, specialized by two build args (`EXTRA` =
+dependency group, `WORKER` = console script). They differ only in what they read and
+write. Full detail per worker in [§7](#7-worker-reference).
 
 | Worker | Role | Reads | Writes | Poll (default) |
 |--------|------|-------|--------|----------------|
-| **chain-watcher** | Sync subnet membership from the Bittensor chain | chain metagraph, `registrations` | `registrations` | 6s |
+| **chain-watcher** | Sync subnet membership from the chain | chain metagraph, `registrations` | `registrations` | 6s |
 | **qualification** | LLM security review of near-head submissions | `submissions`, `registrations`, `submission_qualifications` | `submissions` (status), `submission_qualifications` | 10s |
 | **task-generator** | Mine GitHub commits → LLM task descriptions | `kings`, `tasks` (counts) | `tasks` (CANDIDATE), `task_generation_failures` | 30s |
 | **task-solver** | Run king/challenger agents in sandboxes | `kings`, `tasks`, `challenges`, `duel_task_solutions` | `tasks` (PENDING_SCREEN/DISQUALIFIED), `task_screenings`, `duel_task_solutions` | 30s idle, ~1s on backlog |
-| **task-screener** | Score one king qualification patch per task; shadow or enforce the difficulty ceiling | `kings`, `tasks`, `task_screenings` | `tasks` (QUALIFIED/DISQUALIFIED), `task_screenings` | 10s |
+| **task-screener** | Score the king's qualification patch; shadow or enforce the difficulty ceiling | `kings`, `tasks`, `task_screenings` | `tasks` (QUALIFIED/DISQUALIFIED), `task_screenings` | 10s |
 | **judge** | Blinded pairwise LLM comparison | `tasks`, `kings`, `challenges`, `duel_task_solutions`, `judgements` | `judgements` | 10s |
 | **duel-resolver** | Resolve duels, crown kings (**singleton**) | `kings`, `submissions`, `registrations`, `tasks`, `judgements`, `challenges` | `challenges`, `duel_resolutions`, `kings` | 5s |
-| **weight-setter** | Set on-chain weights across the rolling king window (**singleton**) | `kings`, `registrations`, chain metagraph | Bittensor `set_weights` extrinsic | ~12s |
+| **weight-setter** | Set on-chain weights across the king window (**singleton**) | `kings`, `registrations`, chain metagraph | `set_weights` extrinsic | ~12s |
 | **dashboard** | Serve the public read-only JSON API | most tables (read model) | — (HTTP only) | on request |
-| **benchmark-worker** | Benchmark each new king against SWE-bench Pro (**optional, host-run**) | `kings` | per-king result files on disk | 60s |
+| **benchmark-worker** | Benchmark each new king against SWE-bench Pro (**optional, host-run**) | `kings` | per-king result files | 60s |
 
-> **Submission ingestion is a seam.** The chain-watcher syncs *registrations*
-> only. An external step extracts each miner's agent bundle into
-> `TAU_SUBMISSIONS_DIR` and inserts a `submissions` row as `UNVERIFIED`; the
-> **qualification** worker is the gate that promotes it to `ELIGIBLE` (or a
-> terminal status). The `submissions`-row insert itself is still an integration
-> point — see [src/tau/db/status.py](src/tau/db/status.py). For local runs,
+> **Submission ingestion is a seam.** The chain-watcher syncs *registrations* only. An
+> external step extracts each miner's agent bundle into `TAU_SUBMISSIONS_DIR` and
+> inserts a `submissions` row as `UNVERIFIED`; the [qualification](#72-qualification)
+> worker then gates it to `ELIGIBLE`. The `submissions`-row insert is still an
+> integration point — see [src/tau/db/status.py](src/tau/db/status.py). For local runs,
 > submissions and the first king are seeded with
 > [examples/task_solver/seed_duel.py](examples/task_solver/seed_duel.py).
 
@@ -181,10 +170,10 @@ they read and write.
 
 ## 6. Data model
 
-The tables and three read-only views are created by the Alembic migrations
+Tables and three read-only views are created by the Alembic migrations
 ([deploy/migrate/alembic/versions/0001_initial.py](deploy/migrate/alembic/versions/0001_initial.py)).
-The ORM models in [src/tau/db/models.py](src/tau/db/models.py) mirror it and are
-what the tests build from.
+The ORM models in [src/tau/db/models.py](src/tau/db/models.py) mirror it and are what
+the tests build from.
 
 ![Entity-relationship diagram](docs/diagrams/erd.png)
 
@@ -200,13 +189,14 @@ Defined in [src/tau/db/status.py](src/tau/db/status.py):
 | `DuelOutcome` | `duel_resolutions.outcome` | `KING_WON=0`, `CHALLENGER_WON=1`, `CHALLENGER_DEREGISTERED=2` |
 | `SubmissionStatus` | `submissions.status_id` | `UNVERIFIED=0`, `ELIGIBLE=1`, `DISQUALIFIED=2`, `NEEDS_REVIEW=3` |
 
-> Ingestion writes `UNVERIFIED`; the qualification worker promotes to `ELIGIBLE`
-> or a terminal status; the duel-resolver only reads `ELIGIBLE`. The per-submission
-> review detail lives in `submission_qualifications` (outcome, verdict, scores,
-> risks, model, timing — one mutable row per submission).
+Notes:
 
-> `ChallengeStatus.POOL_ONE/POOL_TWO` deliberately equal the matching `PoolType`
-> values: active-round queries gate on `pool_type == status`.
+- `ChallengeStatus.POOL_ONE/POOL_TWO` deliberately equal the matching `PoolType`
+  values — active-round queries gate on `pool_type == status`.
+- Ingestion writes `UNVERIFIED`; qualification promotes to `ELIGIBLE` or a terminal
+  status; the duel-resolver reads only `ELIGIBLE`. Per-submission review detail lives
+  in `submission_qualifications` (one mutable row: outcome, verdict, scores, risks,
+  model, timing).
 
 ### Views
 
@@ -220,290 +210,262 @@ Defined in [src/tau/db/status.py](src/tau/db/status.py):
 
 ## 7. Worker reference
 
-For each worker below: what it does, **its loop**, and **how it talks to the
-database** (which tables, and which statuses it sets). In the DB diagrams,
-**dotted = read**, **bold = write**.
+For each worker: what it does, its loop, and how it talks to the database (which
+tables, which statuses). In the DB diagrams, **dotted = read**, **bold = write**.
 
 ### 7.1 chain-watcher
 
-Polls the Bittensor **subnet 66** chain, snapshots the metagraph, and appends a
-`registrations` row for any uid whose hot/cold key pair changed since the last
-recorded row. Registration block times are resolved through an **archive node**
-(lite nodes prune historical state), memorized per block. It is the only worker
-that needs the `bittensor` SDK.
+Snapshots the subnet 66 metagraph and records membership changes.
+
+- Appends a `registrations` row for any uid whose hot/cold key pair changed since its
+  last recorded row — `INSERT ... ON CONFLICT (uid, block) DO NOTHING` (append-only).
+- Sets `uid`, `ss58_hot`, `ss58_cold`, `block` (on-chain registration block), and
+  `block_date` (resolved via an **archive node**, since lite nodes prune historical
+  state; memorized per block).
+- Sets no status columns. It is the only worker that needs the `bittensor` SDK for
+  reads.
 
 | Loop | Database |
 |------|----------|
 | ![chain-watcher loop](docs/diagrams/loop-chain-watcher.png) | ![chain-watcher DB](docs/diagrams/db-chain-watcher.png) |
 
-- **Writes:** `registrations` — `INSERT ... ON CONFLICT (uid, block) DO NOTHING`
-  (append-only; never updates). Sets `uid`, `ss58_hot`, `ss58_cold`, `block`
-  (the on-chain registration block), `block_date` (resolved UTC time).
-- **Sets no status columns.**
-
 ### 7.2 qualification
 
-The submission security gate. It walks the **near-head window** of the
-registration queue (`TAU_QUALIFICATION_WINDOW_SIZE` most-recent, still-registered
-submissions), and for each `UNVERIFIED` one runs a single LLM review of the
-agent bundle — the submitted `agent.py`/`agent/` files, optionally **diffed
-against a public base harness** (`TAU_QUALIFICATION_BASE_PATH`) so the reviewer
-sees exactly what the miner changed. The review looks for security risks
-(network exfiltration, sandbox escape, host tampering, credential theft), not
-code quality.
+The submission security gate: only submissions it clears can challenge.
 
-| Loop | Database |
-|------|----------|
-| — | reads `submissions`/`registrations`; writes `submissions.status_id` + `submission_qualifications` |
+- Walks the near-head window of the registration queue (`TAU_QUALIFICATION_WINDOW_SIZE`
+  most-recent, still-registered submissions) and reviews each `UNVERIFIED` bundle with
+  one LLM call.
+- Reviews the submitted `agent.py`/`agent/` files, optionally diffed against a public
+  base harness (`TAU_QUALIFICATION_BASE_PATH`) so the model sees only what the miner
+  changed. It looks for security risks (network exfiltration, sandbox escape, host
+  tampering, credential theft), not code quality.
+- Verdict → status: `pass` → `ELIGIBLE`, `warn` → `NEEDS_REVIEW`, `fail` →
+  `DISQUALIFIED`. Outcome and status change land in one guarded transaction, only if
+  the submission is still `UNVERIFIED`.
+- A model/transport/parse failure records an `error` row and leaves the submission
+  `UNVERIFIED` for the next tick — a flaky LLM never rejects a miner.
+- If `TAU_QUALIFICATION_BASE_PATH` is unset or missing, it reviews the full bundle and
+  records `base_files_available=false`.
 
-- **Verdict → status.** `pass` → `ELIGIBLE`, `warn` → `NEEDS_REVIEW`, `fail` →
-  `DISQUALIFIED`. Only `ELIGIBLE` submissions can be opened as challengers.
-- **Errors don't disqualify.** A model/transport/parse failure records an `error`
-  row and leaves the submission `UNVERIFIED`, so the next tick retries it — a flaky
-  LLM never silently rejects a miner.
-- **Guarded writes.** The final outcome and the submission status change land in
-  one transaction, and only if the submission is still `UNVERIFIED`.
-- If `TAU_QUALIFICATION_BASE_PATH` is unset or missing, it runs in degraded mode
-  (reviews the full bundle, records `base_files_available=false`).
+Writes `submissions.status_id` and `submission_qualifications`.
 
 ### 7.3 task-generator
 
-Keeps each pool of the reigning king topped up with **CANDIDATE** tasks. It
-samples real public GitHub commits (rotating a pool of tokens with per-token
-cooldowns), screens them for quality (code-only, ≥100 changed lines, no
-lockfiles/merges), asks an LLM to write a problem statement, and inserts a task.
-Idles whenever no king reigns.
+Keeps each pool of the reigning king topped up with `CANDIDATE` tasks. Idles when no
+king reigns.
+
+- Samples public GitHub commits (rotating a token pool with per-token cooldowns),
+  screens them (code-only, ≥100 changed lines, no lockfiles/merges), asks an LLM to
+  write a problem statement, and inserts a task.
+- Reads: reigning king from `kings`; per-pool counts from `tasks`
+  (`status_id != DISQUALIFIED`) vs. configured targets.
+- Writes: `tasks` with `status_id = CANDIDATE` plus a content fingerprint —
+  `ON CONFLICT (content_fingerprint) DO NOTHING` dedupes the same upstream commit mined
+  from any fork. LLM failures append to `task_generation_failures` (observability only,
+  never read by the pipeline).
 
 | Loop | Database |
 |------|----------|
 | ![task-generator loop](docs/diagrams/loop-task-generator.png) | ![task-generator DB](docs/diagrams/db-task-generator.png) |
 
-- **Reads:** reigning king from `kings`; per-pool counts from `tasks`
-  (`status_id != DISQUALIFIED`) vs. the configured pool targets.
-- **Writes:** `tasks` with `status_id = CANDIDATE (0)`, a `pool_type`, and a
-  content fingerprint — `ON CONFLICT (content_fingerprint) DO NOTHING`
-  deduplicates the same upstream commit mined from any fork. When the LLM fails
-  every attempt, it appends to `task_generation_failures` (an observability log,
-  never read by the pipeline).
-
 ### 7.4 task-solver
 
-The only worker that runs **untrusted miner code**. Its scheduler does two jobs,
-keeping up to `MAX_CONTAINERS` sandboxes running in parallel:
+The only worker that runs untrusted miner code. Its scheduler keeps up to
+`MAX_CONTAINERS` sandboxes running in parallel and does two jobs:
 
-1. **Qualify** — run the **king's** agent on `CANDIDATE` tasks. If the king
-   succeeds and changes at least `TAU_SOLVER_QUALIFY_MIN_CHANGED_LINES` lines,
-   persist that qualification patch and move the task to `PENDING_SCREEN`.
-   Otherwise it becomes `DISQUALIFIED`. This patch is screening input only and
-   is never reused as the king's duel answer.
-2. **Solve** — for `QUALIFIED` tasks of active challenges, run whichever fresh
-   challenge-scoped side is missing: the king, the challenger, or both. These
-   `duel_task_solutions` rows feed the judge.
+1. **Qualify** — run the king's agent on `CANDIDATE` tasks. If it succeeds and changes
+   at least `TAU_SOLVER_QUALIFY_MIN_CHANGED_LINES` lines, persist that patch and move
+   the task to `PENDING_SCREEN`; otherwise `DISQUALIFIED`. This patch is screening input
+   only, never the king's duel answer.
+2. **Solve** — for `QUALIFIED` tasks of active challenges, run whichever fresh side is
+   missing (king, challenger, or both). These `duel_task_solutions` rows feed the judge.
 
-Active duel solves are prioritized; qualification jobs fill remaining capacity. See
-[§8](#8-agent-execution-environment-sandboxing) for how the sandbox works.
-`MAX_CONTAINERS` is the maximum number of concurrent sandboxes. While work is
-running, the scheduler re-polls about once per second and fills each slot as soon
-as its previous job completes; it uses `TAU_SOLVER_POLL_SECONDS` only while idle.
-The deployment example uses `MAX_CONTAINERS=100` to match a 50-task, two-sided duel.
+Duel solves are prioritized; qualification fills remaining capacity. While work runs,
+the scheduler re-polls about once a second and refills each slot as its job completes;
+`TAU_SOLVER_POLL_SECONDS` applies only when idle. The `.env.example` uses
+`MAX_CONTAINERS=100` to match a 50-task, two-sided duel. Sandbox internals are in [§8](#8-agent-execution-environment-sandboxing).
+
+- Sets `tasks.status_id` → `PENDING_SCREEN` or `DISQUALIFIED` during qualification.
+- Writes `task_screenings` (the qualification patch) and `duel_task_solutions` (fresh
+  duel patches: `solution`, `duration`, `exit_reason`), idempotent on
+  `(task_id, challenger_submission_id, submission_id)`.
+- Retention: qualification stores only the final patch; duel solves also keep duration,
+  exit reason, and sanitized aggregate usage — not the full model conversation.
+- Infra vs. miner faults: an upstream/LLM outage or sandbox/Docker failure
+  (`EXIT_UPSTREAM_ERROR` / `EXIT_SANDBOX_ERROR`) is retryable — nothing is persisted,
+  the task is retried next tick. Everything else (agent crash, empty patch, timeout,
+  budget trip) is terminal and persisted, so a bad miner can't spin the loop.
 
 | Loop | Database |
 |------|----------|
 | ![task-solver loop](docs/diagrams/loop-task-solver.png) | ![task-solver DB](docs/diagrams/db-task-solver.png) |
 
-- **Sets statuses:** `tasks.status_id` → `PENDING_SCREEN (3)` or
-  `DISQUALIFIED (2)` during qualification.
-- **Writes:** `task_screenings` with the viable qualification patch;
-  `duel_task_solutions` with fresh duel patches (`solution`, `duration`, `exit_reason`),
-  idempotent on `(task_id, challenger_submission_id, submission_id)`.
-- **Rollout retention:** qualification stores only the final patch. Duel solves
-  additionally keep duration, exit reason, and sanitized aggregate usage—not the
-  full model conversation or step-by-step rollout.
-- **Infra vs. miner faults:** an upstream/LLM outage or a sandbox/Docker failure
-  (`EXIT_UPSTREAM_ERROR` / `EXIT_SANDBOX_ERROR`) is **retryable** — nothing is
-  persisted and the task is picked up next tick. Everything else (agent crash,
-  empty patch, timeout, budget trip) is a **terminal** outcome and is persisted,
-  so a bad miner can't spin the loop forever.
-
 ### 7.5 task-screener
 
-Scores the king's saved qualification patch for each `PENDING_SCREEN` task. This
-is a dedicated **single-candidate** evaluation against the task statement; it does
-not create a fake challenger, reuse a duel judgement, or write `judgements`.
-`TAU_TASK_SCREEN_MODE=shadow` is the rollout default: it records the real score
-and then qualifies the task without applying the numeric ceiling. This lets an
-operator choose the enforcement ceiling from production data before enabling it.
+Scores the king's saved qualification patch for each `PENDING_SCREEN` task. This is a
+single-candidate evaluation against the task statement — it does not create a fake
+challenger, reuse a duel judgement, or write `judgements`.
+
+Modes (`TAU_TASK_SCREEN_MODE`):
+
+- `shadow` (default) — records the real score, then qualifies the task without applying
+  the ceiling. Lets an operator calibrate the ceiling from production data first.
+- `enforce` — a normalized score strictly greater than `TAU_TASK_SCREEN_MAX_KING_SCORE`
+  disqualifies the task; equal or lower qualifies it.
+- `disabled` — skips the LLM and qualifies pending tasks, so screening tests and local
+  runs need no OpenRouter key.
+
+Other behavior:
+
+- Prompt injection is a terminal disqualification in active modes, independent of the
+  ceiling.
+- A model/transport/timeout/parse failure records telemetry and schedules an
+  exponential-backoff retry. After `TAU_TASK_SCREEN_MAX_FAILED_RUNS` it disqualifies
+  the task as `screening_exhausted` and the generator refills the deficit — one
+  unscreenable task cannot hold a pool open forever. No neutral-score fallback.
+- Primary and fallback routes interleave by attempt round, so a hanging primary can't
+  consume every retry. Time budgets match the production duel judge.
+- Guarded writes require the same king and `PENDING_SCREEN` state, so a late score
+  cannot affect a stale pool after the king changes.
 
 | Loop | Database |
 |------|----------|
 | ![task-screener loop](docs/diagrams/loop-task-screener.png) | ![task-screener DB](docs/diagrams/db-task-screener.png) |
 
-- In `enforce` mode, a normalized score strictly greater than
-  `TAU_TASK_SCREEN_MAX_KING_SCORE` disqualifies the task; equality or a lower
-  score qualifies it. `shadow` records the same decision inputs but admits both
-  sides of the boundary. `disabled` skips the LLM and qualifies pending tasks,
-  so task-screening tests and local screening runs need no OpenRouter key.
-- Prompt injection is an explicit terminal disqualification reason in active
-  screening modes, independent of the numeric ceiling.
-- A model, transport, timeout, or parse failure records telemetry and schedules
-  an exponential-backoff retry. After `TAU_TASK_SCREEN_MAX_FAILED_RUNS`, it
-  terminally disqualifies the task as `screening_exhausted`; the generator then
-  fills the pool deficit. There is no neutral-score fallback, and one
-  permanently unscreenable task cannot hold a full-pool duel open forever.
-- Primary and fallback routes are interleaved by attempt round, so a hanging
-  primary cannot consume every retry before a fallback is tried. The per-call
-  and total time budgets deliberately match the production duel judge.
-- Guarded writes require the same king and `PENDING_SCREEN` state, so a late score
-  cannot affect a stale pool after the king changes.
-
 ### 7.6 judge
 
-Compares the king's and challenger's solution for each QUALIFIED task in an
-active challenge, producing one `judgements` row per pair. Every comparison is
-**blinded**: a per-pair hash decides whether the king is "candidate A" or "B",
-so the LLM never learns which patch belongs to whom. Patches are also scanned for
-**prompt injection**; a detected attempt is scored deterministically instead of
-being sent to the model.
+Compares the king's and challenger's solution for each QUALIFIED task in an active
+challenge, writing one `judgements` row per pair.
+
+- Every comparison is blinded: a per-pair hash decides whether the king is candidate A
+  or B, so the model never learns which patch is whose.
+- Patches are scanned for prompt injection; a detected attempt is scored
+  deterministically instead of being sent to the model.
+- Writes `judgements` (`llm_winner`, `king_score`, `challenger_score`, plus telemetry),
+  `ON CONFLICT DO NOTHING` (first verdict wins).
+- The `error` column is meaningful: if all attempts fail or time out, the judge writes a
+  neutral error verdict (`0.5 / 0.5`, winner `tie`) with `error` set — not a tie the
+  model decided.
+- Retries the judge model up to `TAU_JUDGE_ATTEMPTS`, bounded by `TAU_JUDGE_TOTAL_TIMEOUT`.
 
 | Loop | Database |
 |------|----------|
 | ![judge loop](docs/diagrams/loop-judge.png) | ![judge DB](docs/diagrams/db-judge.png) |
 
-- **Writes:** `judgements` (`llm_winner`, `king_score`, `challenger_score`,
-  plus telemetry), `ON CONFLICT DO NOTHING` (first verdict wins).
-- **The `error` column is meaningful:** if all model attempts fail or time out,
-  the judge writes a **neutral error verdict** (`0.5 / 0.5`, winner `tie`) with
-  `error` set — that is *not* a tie the model actually decided.
-- Retries the configured judge model up to `TAU_JUDGE_ATTEMPTS`, bounded by
-  `TAU_JUDGE_TOTAL_TIMEOUT`.
-
 ### 7.7 duel-resolver
 
-The arbiter and the **sole writer of `challenges` and `kings`** — **run exactly
-one instance** (never scale it). Each tick it takes one consistent snapshot of
-the arena, runs a pure decision function, and applies at most one guarded state
-transition. Guarded writes (conditioned on the pool it observed) make it safe
-against races even though it never holds locks across ticks.
+The arbiter and **sole writer of `challenges` and `kings`** — run exactly one instance,
+never scale it. Each tick it takes one consistent snapshot of the arena, runs a pure
+decision function, and applies at most one guarded state transition (conditioned on the
+pool it observed), which keeps it race-safe without holding locks across ticks.
+
+- Opens a challenge for the oldest `ELIGIBLE`, still-registered submission:
+  `INSERT challenges status = POOL_ONE`.
+- Advances / promotes / closes by updating `challenges.status` and appending a
+  `duel_resolutions` row that snapshots the tally, raw quality, token boosts, merged
+  scores, token totals, configured margins, and `outcome`.
+- Crowns a new king on a POOL_TWO win by inserting into `kings`
+  (`ON CONFLICT DO NOTHING`).
+- Drains safely: `SIGUSR1` lets the active duel finish but blocks the next challenge;
+  `SIGUSR2` resumes.
+- In mean mode, token efficiency modifies both sides symmetrically: on each task a side
+  can earn `1 - its_tokens / other_side_tokens` when its score is at least
+  `TAU_DUEL_TOKEN_MIN_SCORE` and within `TAU_DUEL_TOKEN_SCORE_TOLERANCE`. The full-pool
+  average saving is multiplied by the bonus multiplier and added to that side's raw
+  mean; one final margin gate compares the merged scores.
 
 | Loop | Database |
 |------|----------|
 | ![duel-resolver loop](docs/diagrams/loop-duel-resolver.png) | ![duel-resolver DB](docs/diagrams/db-duel-resolver.png) |
 
-- **Opens** a challenge for the oldest `ELIGIBLE`, still-registered submission:
-  `INSERT challenges status = POOL_ONE (1)`.
-- **Advances / promotes / closes** by updating `challenges.status` to
-  `POOL_TWO (2)` or `CLOSED (0)`, and appending a `duel_resolutions` row that
-  snapshots the tally, raw quality, token boosts, merged scores, token totals,
-  configured margins, and `outcome`.
-- **Crowns** a new king on a POOL_TWO win by inserting into `kings`
-  (`ON CONFLICT DO NOTHING`).
-- **Drains safely:** `SIGUSR1` lets the active duel finish but blocks the next
-  challenge; `SIGUSR2` resumes opening challenges.
-- In mean mode, token efficiency modifies both sides symmetrically. On each task,
-  a side can earn `1 - its tokens / the other side's tokens` when its score is at
-  least the configured minimum and within the configured tolerance. The average
-  saving over the full pool is multiplied by the bonus multiplier and added to
-  that side's raw mean. The one final margin gate compares the merged scores.
-
 ### 7.8 weight-setter
 
-The **sole setter of on-chain weights** — **run exactly one instance** (never
-scale it). It signs the `set_weights` extrinsic with a mounted Bittensor wallet
-hotkey, so it is the only worker besides chain-watcher that touches the chain.
+The **sole setter of on-chain weights** — run exactly one instance, never scale it. It
+signs the `set_weights` extrinsic with a mounted wallet hotkey.
 
-| Loop | Database |
-|------|----------|
-| gate on epoch + rate limit → compute → submit | reads the recent-king window from `kings`/`registrations` |
-
-- **Emission split (the rolling king window).** With all five slots filled:
-  40% to the reigning king and 15% to each of the four prior kings. While fewer
-  than five distinct kings have reigned, a bootstrap table splits 100% among the
-  ones that exist (e.g. two kings → 60/40, three → 40/30/30). Emission follows
-  the **hotkey**, and a king that has since deregistered is skipped.
-- **Burn.** Any unfilled or ineligible share burns to `TAU_WEIGHT_BURN_UID`
-  (uid 0 by convention). `TAU_WEIGHT_BURN_MODE=true` emits 100% to the burn uid
-  regardless of king history — a deliberate, restart-toggled kill switch.
-- **Cadence.** Level-triggered: each tick it checks the chain's weight-set rate
-  limit and the epoch boundary, and only submits within `TAU_WEIGHT_SET_MARGIN`
-  blocks of the boundary — landing the vector as late as possible (capturing the
-  latest king) while leaving time for inclusion.
+- Emission split across the rolling king window: with all five slots filled, 40% to the
+  reigning king and 15% to each of the four prior kings. While fewer than five distinct
+  kings have reigned, a bootstrap table splits 100% among those that exist (1 king →
+  100; 2 → 60/40; 3 → 40/30/30; 4 → 40/20/20/20).
+- Emission follows the hotkey; a king that has since deregistered is skipped.
+- Any unfilled or ineligible share burns to `TAU_WEIGHT_BURN_UID` (uid 0 by
+  convention). `TAU_WEIGHT_BURN_MODE=true` emits 100% to the burn uid regardless of
+  king history — a restart-toggled kill switch.
+- Cadence: each tick checks the chain's weight-set rate limit and the epoch boundary,
+  and submits only within `TAU_WEIGHT_SET_MARGIN` blocks of the boundary — landing the
+  vector as late as possible while leaving time for inclusion.
 
 ### 7.9 dashboard
 
-A small, DB-backed HTTP service (`tau-dashboard-api`) that serves the public
-read model for **ninja66.ai** as JSON under `/api/dashboard/*`. It is read-only
-and deliberately **leaks nothing sensitive**: no task prompts, solution diffs,
-judge rationales, filesystem paths, or raw submission bundles — only aggregate
-tournament state (current king, recent duels, standings, emission shares).
+A DB-backed HTTP service (`tau-dashboard-api`) that serves the public read model for
+ninja66.ai as JSON under `/api/dashboard/*`.
 
-It listens on `TAU_DASHBOARD_PORT` (8066) and in production sits behind the
-nginx config in [deploy/nginx/ninja66.conf](deploy/nginx/ninja66.conf), which
-terminates TLS and reverse-proxies the API.
+- Read-only, and leaks nothing sensitive: no task prompts, solution diffs, judge
+  rationales, filesystem paths, or raw bundles — only aggregate tournament state
+  (current king, recent duels, standings, emission shares).
+- Listens on `TAU_DASHBOARD_PORT` (8066). In production it sits behind
+  [deploy/nginx/ninja66.conf](deploy/nginx/ninja66.conf), which terminates TLS and
+  reverse-proxies the API.
 
 ### 7.10 benchmark-worker (optional)
 
-An **objective** counterpart to the blinded judge ladder. It watches the `kings`
-table and, for each new king, runs that king's real `agent.py` against
-**SWE-bench Pro**, scoring test-resolution rate and cost with the official Scale
-evaluator and writing a per-king result folder. It is restart-safe: an on-disk
-`benchmark.json` marker plus the suite's per-instance resume means an interrupted
-run continues where it left off.
+An objective counterpart to the blinded judge ladder: it watches `kings` and, for each
+new king, runs that king's real `agent.py` against SWE-bench Pro, scoring
+test-resolution rate and cost with the official Scale evaluator and writing a per-king
+result folder.
 
-Unlike the other workers it is **not a self-contained image**: it shells out to a
-separate benchmark suite checkout (`TAU_BENCH_REPO_DIR`) and drives
-docker-out-of-docker to run multi-GB images, so it is run on the host rather than
-via compose. See
-[src/tau/workers/benchmark/README.md](src/tau/workers/benchmark/README.md) for
-the full setup and the commented `benchmark-worker` block in `compose.yaml`.
+- Restart-safe: an on-disk `benchmark.json` marker plus the suite's per-instance resume
+  means an interrupted run continues where it left off.
+- Not a self-contained image: it shells out to a separate benchmark suite checkout
+  (`TAU_BENCH_REPO_DIR`) and drives docker-out-of-docker to run multi-GB images, so it
+  runs on the host, not via compose.
+- See [src/tau/workers/benchmark/README.md](src/tau/workers/benchmark/README.md) and
+  the commented `benchmark-worker` block in `compose.yaml`.
 
 ---
 
 ## 8. Agent execution environment (sandboxing)
 
-The agent must be able to call an LLM to solve a task, but must **not** be able to:
-reach the internet, read the validator's real LLM API key, spend without bound,
-or influence the host. This is enforced by task-solver sandbox.
+The agent must be able to call an LLM to solve a task, but must **not** reach the
+internet, read the validator's real LLM key, spend without bound, or influence the
+host. The task-solver enforces this.
 
 ### Architecture
 
 ![Sandbox architecture](docs/diagrams/sandbox-architecture.png)
 
-The building blocks:
-
-- **Docker-out-of-docker.** The task-solver mounts the host `/var/run/docker.sock`
-  and spawns **sibling** sandbox containers on the host daemon (not nested).
+- **Docker-out-of-docker.** The task-solver mounts the host `/var/run/docker.sock` and
+  spawns sibling sandbox containers on the host daemon (not nested).
 - **Internet-less network.** Sandboxes attach to a Docker network created with
-  `internal: true` — **no default gateway, no internet**. The only host the
-  agent can reach is the validator's in-process LLM proxy (via a fixed alias).
-- **The in-process proxy is the only exit.** The agent is given a proxy URL and a
-  **per-solve bearer token** (not the real key). The proxy authenticates that
-  token, then forwards the request to the real upstream with the **real key
-  injected server-side** — the key never enters the container. The proxy also:
-  - **forces the model** (`SOLVER_MODEL`) and locks sampling params
-    (`temperature=0`, `top_p=1`, plus a stable validator-owned `seed` derived
-    from the task id), stripping miner-supplied params like `seed`, `top_k`,
-    `logit_bias`;
-  - **enforces per-solve spend caps** (`SOLVER_MAX_*`), clamping `max_tokens`
-    and rejecting requests that would exceed a budget;
-  - **records usage / rollouts** (redacting secrets).
-- **Locked-down container.** Read-only rootfs, `cap_drop: ALL`,
-  `no-new-privileges`, no swap, and limits on memory (2g), CPU (1.0), PIDs (256),
-  and file descriptors. Only `/work` (the bind-mounted task tree) and `/tmp` are
-  writable (tmpfs). Runs as the worker's own UID so it owns the mount without
-  extra capabilities.
-- **Watchdog timeouts.** A hard wall-clock cap (`600s`) and a first-token
-  timeout (`300s`) kill a stuck or stalling agent.
-- **Clean work tree.** The task repo is cloned at the parent commit and its git
-  credentials are scrubbed before the tree is exposed to the sandbox.
+  `internal: true` — no gateway, no internet. The only reachable host is the
+  validator's in-process LLM proxy (via a fixed alias).
+- **The in-process proxy is the only exit.** The agent gets a proxy URL and a per-solve
+  bearer token (not the real key). The proxy authenticates the token and forwards the
+  request upstream with the real key injected server-side — the key never enters the
+  container. The proxy also:
+  - forces the model (`SOLVER_MODEL`) and locks sampling (`temperature=0`, `top_p=1`,
+    plus a stable validator-owned `seed` from the task id), stripping miner-supplied
+    params like `seed`, `top_k`, `logit_bias`;
+  - enforces per-solve spend caps (`SOLVER_MAX_*`), clamping `max_tokens` and rejecting
+    requests that would exceed a budget;
+  - records usage / rollouts (redacting secrets).
+- **Locked-down container.** Read-only rootfs, `cap_drop: ALL`, `no-new-privileges`, no
+  swap, limits on memory (2g), CPU (1.0), PIDs (256), and file descriptors. Only `/work`
+  (bind-mounted task tree) and `/tmp` are writable (tmpfs). Runs as the worker's UID.
+- **Watchdog timeouts.** A hard wall-clock cap (600s) and a first-token timeout (300s)
+  kill a stuck agent.
+- **Clean work tree.** The repo is cloned at the parent commit and its git credentials
+  are scrubbed before the tree is exposed.
 
 ### One solve, end to end
 
 ![Sandbox solve sequence](docs/diagrams/sandbox-sequence.png)
 
-After the agent exits, the harness computes the **authoritative git diff** of the
-work tree (so an agent that edits files but returns no patch is still scored on
-what it changed). The solver then inspects the proxy's usage snapshot to classify
-the outcome as a retryable infra fault or a terminal result.
+After the agent exits, the harness computes the authoritative git diff of the work tree
+(so an agent that edits files but returns no patch is still scored on what it changed).
+The solver then inspects the proxy's usage snapshot to classify the outcome as a
+retryable infra fault or a terminal result.
 
 ### Security properties
 
@@ -517,14 +479,13 @@ the outcome as a retryable infra fault or a terminal result.
 | No runaway agents | Hard timeout + first-token timeout watchdog. |
 | Infra faults not blamed on miners | Upstream 401/402/403/408/429/5xx & transport errors are retried, not persisted. |
 
-Everything here is configured via `TAU_SANDBOX_*`, `SOLVER_*`, and
-`TAU_PROXY_*` env vars — see [§11](#11-configuration-reference).
+Configured via `TAU_SANDBOX_*`, `SOLVER_*`, and `TAU_PROXY_*` — see [§11](#11-configuration-reference).
 
 ---
 
 ## 9. Information for miners
 
-A **submission** is an agent bundle. On the validator it lives at:
+A submission is an agent bundle. On the validator it lives at:
 
 ```
 $TAU_SUBMISSIONS_DIR/<submission_id>/agent.py       # entry point (required)
@@ -533,7 +494,7 @@ $TAU_SUBMISSIONS_DIR/<submission_id>/agent/...       # optional supporting packa
 
 ### The agent contract
 
-Your `agent.py` must define a single function:
+Your `agent.py` must define one function:
 
 ```python
 def solve(repo_path, issue, model, api_base, api_key) -> dict:
@@ -550,27 +511,29 @@ def solve(repo_path, issue, model, api_base, api_key) -> dict:
 
 What matters:
 
-- **The git diff is authoritative.** The harness runs `git diff` (tracked +
-  untracked) over `repo_path` after you return. Just edit files in place — you do
-  not need to construct a patch yourself. A returned `patch` is only used as a
-  fallback if the tree is otherwise unchanged.
-- **Call the model through `api_base`/`api_key` only.** There is no internet.
-  The sandbox image ships `openai`, `httpx`, and `mini-swe-agent`; anything else
-  your agent needs must be **vendored** into your bundle (no `pip install` at
-  runtime). See [examples/task_solver/agents/swe_agent.py](examples/task_solver/agents/swe_agent.py)
+- **The git diff is authoritative.** The harness runs `git diff` (tracked + untracked)
+  over `repo_path` after you return. Just edit files in place. A returned `patch` is
+  only a fallback if the tree is otherwise unchanged.
+- **Call the model through `api_base`/`api_key` only.** There is no internet. The
+  sandbox image ships `openai`, `httpx`, and `mini-swe-agent`; anything else must be
+  vendored into your bundle (no `pip install` at runtime). See
+  [examples/task_solver/agents/swe_agent.py](examples/task_solver/agents/swe_agent.py)
   for the minimal real-LLM pattern and
   [noop_agent.py](examples/task_solver/agents/noop_agent.py) for a token-free one.
-- **You are on a spend budget.** The proxy may cap requests, tokens, and cost per
-  solve (`SOLVER_MAX_*`) and forces `model` + deterministic sampling. Requests
-  over budget are rejected; blowing the budget ends your solve.
-- **Respect the timeouts.** A solve has a hard wall-clock limit and a
-  first-token limit; a hung agent is killed and scored on whatever it produced.
+- **You are on a spend budget.** The proxy may cap requests, tokens, and cost per solve
+  (`SOLVER_MAX_*`) and forces `model` + deterministic sampling. Over-budget requests are
+  rejected; blowing the budget ends your solve.
+- **Respect the timeouts.** A solve has a hard wall-clock limit and a first-token limit;
+  a hung agent is killed and scored on whatever it produced.
+- **Your bundle is security-reviewed before you can compete.** The
+  [qualification](#72-qualification) gate reads your agent files and rejects
+  network-exfiltration, sandbox-escape, host-tampering, and credential-theft attempts.
 - **Qualification uses the king's agent, not yours.** Tasks you're judged on were
   already solved by the current king, so they are known-solvable.
-- **Don't try to game the judge.** Comparisons are blinded and patches are
-  scanned for prompt-injection; an injection attempt is scored against you.
-- **How you win:** produce patches that an LLM judge prefers over the king's,
-  consistently enough to clear both pools (`wins > losses + win_margin`).
+- **Don't game the judge.** Comparisons are blinded and patches are scanned for
+  prompt injection; an injection attempt is scored against you.
+- **How you win:** produce patches an LLM judge prefers over the king's, consistently
+  enough to clear both pools (`wins > losses + win_margin`).
 
 ---
 
@@ -579,16 +542,15 @@ What matters:
 ### Prerequisites
 
 - Docker + Docker Compose.
-- A host that can run the Postgres container and the workers. The **task-solver**
-  needs access to the host Docker daemon (it spawns sandbox containers).
-- Credentials: an OpenRouter key for task generation, submission qualification,
-  and task screening in `shadow`/`enforce` mode, plus GitHub token(s) for commit
-  mining. `TAU_TASK_SCREEN_MODE=disabled` means the screener itself no longer
-  forces that key; generator/judge dummy modes are independently token-free. The
-  default solver proxy still needs its configured upstream credential.
-- A **Bittensor wallet** for the weight-setter: its hotkey signs the
-  `set_weights` extrinsic. The wallet directory is mounted read-only (see
-  `HOST_BITTENSOR_WALLETS` and `BITTENSOR_WALLET_NAME`/`_HOTKEY`). The
+- A host that can run the Postgres container and the workers. The task-solver needs
+  access to the host Docker daemon (it spawns sandbox containers).
+- An OpenRouter key for task generation, submission qualification, and task screening in
+  `shadow`/`enforce` mode, plus GitHub token(s) for commit mining.
+  `TAU_TASK_SCREEN_MODE=disabled` drops that requirement for the screener;
+  generator/judge dummy modes are independently token-free. The default solver proxy
+  still needs its upstream credential.
+- A Bittensor wallet for the weight-setter: its hotkey signs `set_weights`. Mounted
+  read-only (see `HOST_BITTENSOR_WALLETS`, `BITTENSOR_WALLET_NAME`/`_HOTKEY`). The
   chain-watcher only reads the chain and needs no wallet.
 
 ### Steps
@@ -600,6 +562,7 @@ cp .env.example .env
 #     POSTGRES_PASSWORD, MONITOR_PASSWORD      (secrets)
 #     OPENROUTER_API_KEY                       (unless using dummy LLMs)
 #     GITHUB_TOKEN or GITHUB_TOKENS            (commit mining)
+#     BITTENSOR_WALLET_NAME, _HOTKEY           (weight-setter)
 #     TAU_SUBMISSIONS_DIR, TAU_SANDBOX_WORK_ROOT
 #     SOLVER_MAX_* spend caps                  (strongly recommended)
 
@@ -615,69 +578,65 @@ docker compose logs migrate     # confirm "alembic upgrade head" succeeded
 
 1. **db** starts, initializes the cluster, and runs
    [deploy/db/00_init.sh](deploy/db/00_init.sh) once as superuser: creates the
-   `pgcrypto`, `pg_stat_statements`, and `pg_trgm` extensions, sets database
-   GUCs (`timezone=UTC`, `statement_timeout=60s`,
-   `idle_in_transaction_session_timeout=60s`, `lock_timeout=10s`), and creates a
-   read-only **`monitor`** role.
-2. **migrate** waits for the DB to be healthy, runs `alembic upgrade head` (all
-   tables, indexes, and the three views — idempotent, safe to re-run), then
-   exits.
-3. Every worker starts once the DB is healthy **and** migrate has completed
-   successfully (`depends_on` gates this).
+   `pgcrypto`, `pg_stat_statements`, and `pg_trgm` extensions, sets database GUCs
+   (`timezone=UTC`, `statement_timeout=60s`, `idle_in_transaction_session_timeout=60s`,
+   `lock_timeout=10s`), and creates a read-only `monitor` role.
+2. **migrate** waits for the DB to be healthy, runs `alembic upgrade head` (all tables,
+   indexes, views — idempotent), then exits.
+3. Every worker starts once the DB is healthy and migrate has completed (`depends_on`
+   gates this).
 
 ### Operational notes
 
-- **Two singletons.** The **duel-resolver** is the sole writer of
-  `challenges`/`kings` and the **weight-setter** is the sole setter of on-chain
-  weights — never `--scale` either. Others (judge, task-solver, qualification)
-  can scale.
+- **Two singletons.** The duel-resolver is the sole writer of `challenges`/`kings` and
+  the weight-setter is the sole setter of on-chain weights — never `--scale` either.
+  Others (judge, task-solver, qualification) can scale.
 - **Public dashboard.** The `dashboard` service publishes the API on
   `127.0.0.1:${TAU_DASHBOARD_HOST_PORT:-8066}`; put nginx
-  ([deploy/nginx/ninja66.conf](deploy/nginx/ninja66.conf)) in front of it for
-  public TLS. Skip the service if you don't need the public site.
-- **Pause between duels for maintenance:** send `SIGUSR1`, then wait for
-  `idle: new_challenges_paused` before stopping or rebuilding services. The
-  active duel continues normally. Send `SIGUSR2` to cancel the pause:
+  ([deploy/nginx/ninja66.conf](deploy/nginx/ninja66.conf)) in front for public TLS.
+  Skip the service if you don't need the public site.
+- **Pause between duels for maintenance.** Send `SIGUSR1`, wait for
+  `idle: new_challenges_paused`, then stop or rebuild. The active duel continues.
+  `SIGUSR2` cancels the pause:
   ```bash
   docker compose kill -s SIGUSR1 duel-resolver
   docker compose logs -f duel-resolver
   docker compose kill -s SIGUSR2 duel-resolver
   ```
-  The pause lives in the running resolver, so after rebuilding, start the
-  resolver last when the rest of the stack is ready.
-- **Existing-validator rollout:** the screening migration is schema-only; it does
-  not delete or retroactively rescore live tasks. To rebuild cleanly, stop the
-  pool/duel workers and reset the reigning king's tasks at a challenge boundary.
-  If a challenge is active, reset it in the same operator-approved transaction so
-  old pool resolutions cannot survive while their task judgements cascade away.
-  Start generator, solver, and task-screener in the default `shadow` mode first;
-  resume judge/duel-resolver only after both pools reach their configured count of
-  `QUALIFIED` tasks. Calibrate the score distribution before changing
-  `TAU_TASK_SCREEN_MODE=enforce`; that mode change applies only to newly screened
-  tasks unless the pool is deliberately rebuilt again.
-- **task-solver requirements:** it mounts `/var/run/docker.sock`, mounts
-  `TAU_SUBMISSIONS_DIR` read-only, and mounts `TAU_SANDBOX_WORK_ROOT` at the
-  **same path on host and in the container**. That same-path rule is mandatory:
-  the sandbox's `/work` bind-mount is resolved by the *host* daemon, so the path
-  must mean the same thing on both sides.
-- **duel-resolver promotion:** compose also mounts `TAU_SUBMISSIONS_DIR`
-  read-only into the singleton resolver so it can publish a promoted king's
-  bundle when `TAU_PROMOTION_PUBLISH_REPO` and a GitHub token are configured.
+  The pause lives in the running resolver, so after a rebuild start the resolver last,
+  once the rest of the stack is ready.
+- **Existing-validator rollout (screening).** The screening migration is schema-only; it
+  does not delete or rescore live tasks. To rebuild cleanly, stop the pool/duel workers
+  and reset the reigning king's tasks at a challenge boundary; if a challenge is active,
+  reset it in the same operator-approved transaction. Start generator, solver, and
+  task-screener in `shadow` mode first; resume judge/duel-resolver only after both pools
+  reach their `QUALIFIED` targets. Calibrate the score distribution before switching to
+  `enforce`; the mode change applies only to newly screened tasks unless the pool is
+  rebuilt.
+- **task-solver mounts:** `/var/run/docker.sock`; `TAU_SUBMISSIONS_DIR` read-only; and
+  `TAU_SANDBOX_WORK_ROOT` at the **same path on host and in the container**. The
+  same-path rule is mandatory — the sandbox's `/work` bind-mount is resolved by the host
+  daemon, so the path must mean the same thing on both sides.
+- **duel-resolver promotion:** compose also mounts `TAU_SUBMISSIONS_DIR` read-only into
+  the resolver so it can publish a promoted king's bundle when
+  `TAU_PROMOTION_PUBLISH_REPO` and a GitHub token are configured.
 - **Run a single worker on the host** (outside compose) for debugging:
   ```bash
   export DATABASE_URL="postgresql+psycopg://appuser:<pw>@localhost:5432/arena"
   uv sync --extra task-solver --locked
-  uv run task-solver      # or: task-generator | task-screener | judge-worker |
-                          #     duel-resolver | chain-watcher | qualification-worker |
-                          #     weight-setter | tau-dashboard-api | benchmark-worker
+  uv run task-solver
+  # other entrypoints: task-generator | task-screener | judge-worker | duel-resolver
+  #                    | chain-watcher | qualification-worker | weight-setter
+  #                    | tau-dashboard-api | benchmark-worker
   ```
 - **Postgres** runs with a tuned [postgresql.conf](deploy/db/postgresql.conf) and
-  `shm_size: 1gb`. The db service is capped at 4 CPU / 8 GB — keep those ≥ what the conf implies.
+  `shm_size: 1gb`. The db service is capped at 4 CPU / 8 GB — keep those ≥ what the conf
+  implies.
 - **Monitoring:** connect the read-only role with
   `psql "postgresql://monitor:<MONITOR_PASSWORD>@localhost:5432/arena"`.
-- **Prune disabled solver endpoints from `.env`:** the solver writes flaky
-  endpoints to `TAU_SOLVER_DISABLED_UPSTREAMS_FILE`. To intentionally reflect
-  that state back into your comma-separated upstream list, run:
+- **Prune disabled solver endpoints from `.env`:** the solver writes flaky endpoints to
+  `TAU_SOLVER_DISABLED_UPSTREAMS_FILE`. To reflect that back into your comma-separated
+  upstream list:
   ```bash
   uv run tau-prune-disabled-upstreams .env
   docker compose up -d --force-recreate task-solver
@@ -685,8 +644,7 @@ docker compose logs migrate     # confirm "alembic upgrade head" succeeded
 
 ### Adding a new migration
 
-Edit [src/tau/db/models.py](src/tau/db/models.py), then from the migrate context
-generate and apply:
+Edit [src/tau/db/models.py](src/tau/db/models.py), then from the migrate context:
 
 ```bash
 # with DATABASE_URL set, from deploy/migrate/
@@ -698,8 +656,8 @@ docker compose up migrate
 
 ## 11. Configuration reference
 
-Everything is set through `.env` (see [.env.example](.env.example) for the
-authoritative, commented list). Grouped by concern:
+Everything is set through `.env` — see [.env.example](.env.example) for the
+authoritative, commented list. Grouped by concern.
 
 ### Database
 
@@ -712,14 +670,14 @@ authoritative, commented list). Grouped by concern:
 | `MONITOR_PASSWORD` | — | Password for the read-only `monitor` role. |
 | `DATABASE_URL` | computed | Overridden per-worker to the compose `db` host; set manually only for host-side runs. |
 
-### Chain / Bittensor (chain-watcher)
+### Chain / Bittensor (chain-watcher, weight-setter)
 
 | Var | Default | Effect |
 |-----|---------|--------|
 | `BITTENSOR_NETWORK` | `finney` | Lite node / network for the metagraph and tip. |
 | `BITTENSOR_ARCHIVE_NETWORK` | `archive` | Archive node for historical registration block times. |
 | `NETUID` | `66` | Subnet to watch. |
-| `POLL_INTERVAL_SECONDS` | `6` | Seconds between chain polls. |
+| `POLL_INTERVAL_SECONDS` | `6` | Seconds between chain polls (chain-watcher). |
 | `LOG_LEVEL` | `INFO` | Logging verbosity (all workers). |
 
 ### GitHub (task-generator; also task-solver repo clones)
@@ -733,29 +691,29 @@ authoritative, commented list). Grouped by concern:
 
 | Var | Default | Effect |
 |-----|---------|--------|
-| `OPENROUTER_API_KEY` | unset | Key for task generation, task screening in `shadow`/`enforce` mode, duel judging, and the default solver proxy upstream. |
+| `OPENROUTER_API_KEY` | unset | Key for task generation, qualification, screening (`shadow`/`enforce`), duel judging, and the default solver proxy upstream. |
 | `LLM_PROVIDER` | `openrouter` | Solver proxy upstream: `openrouter` \| `ninja` \| `custom`. |
 | `OPENROUTER_UPSTREAM_BASE_URL` | `https://openrouter.ai/api` | Override OpenRouter endpoint. |
 | `OPENROUTER_UPSTREAM_BASE_URLS` | unset | Optional comma-separated solver proxy endpoints; sandbox solves use smart sticky routing by default. |
 | `NINJA_INFERENCE_BASE_URL` / `NINJA_INFERENCE_API_KEY` | unset | Used when `LLM_PROVIDER=ninja`. |
-| `NINJA_INFERENCE_BASE_URLS` | unset | Optional comma-separated local inference endpoints, e.g. `<solver-host>:8000/v1,<solver-host>:8001/v1`; sandbox solves use smart sticky routing by default. |
+| `NINJA_INFERENCE_BASE_URLS` | unset | Optional comma-separated local inference endpoints; smart sticky routing by default. |
 | `LLM_UPSTREAM_BASE_URL` / `LLM_UPSTREAM_API_KEY` | unset | Used when `LLM_PROVIDER=custom` (any OpenAI-compatible endpoint). |
-| `LLM_UPSTREAM_BASE_URLS` | unset | Optional comma-separated custom endpoints, e.g. `<solver-host>:8000/v1,<solver-host>:8001/v1`; sandbox solves use smart sticky routing by default. |
-| `TAU_SOLVER_SMART_CACHE_ROUTING` | `true` | Keep each sandbox solve on one upstream endpoint and reuse prompt-prefix affinity across solves; set false for per-request round-robin. |
-| `TAU_SOLVER_DISABLED_UPSTREAMS_FILE` | unset code fallback; `/var/lib/tau/sandbox-work/disabled-upstreams.txt` in `.env.example` | Optional newline-delimited disabled endpoint file. When set, endpoints that reach the max 240s cooldown are written here and avoided permanently; remove the URL from this file and restart the solver to re-enable it. Run `uv run tau-prune-disabled-upstreams .env` to deliberately prune disabled URLs from comma-separated upstream lists. Automatic disable keeps at least one configured endpoint available. |
+| `LLM_UPSTREAM_BASE_URLS` | unset | Optional comma-separated custom endpoints; smart sticky routing by default. |
+| `TAU_SOLVER_SMART_CACHE_ROUTING` | `true` | Keep each solve on one endpoint and reuse prompt-prefix affinity across solves; false = per-request round-robin. |
+| `TAU_SOLVER_DISABLED_UPSTREAMS_FILE` | `/var/lib/tau/sandbox-work/disabled-upstreams.txt` in `.env.example` | Newline-delimited disabled endpoints. Endpoints that hit the 240s cooldown are written here and avoided permanently; remove a URL and restart to re-enable. Automatic disable always keeps at least one endpoint available. |
 
 ### qualification (submission security gate)
 
 | Var | Default | Effect |
 |-----|---------|--------|
 | `OPENROUTER_API_KEY` | required | Key for the security-review LLM. |
-| `TAU_QUALIFICATION_WINDOW_SIZE` | `3` | How many most-recent, still-registered submissions the gate keeps at the queue head. |
-| `TAU_QUALIFICATION_BASE_PATH` | unset | Public base agent harness to diff submissions against; unset → degraded mode (`base_files_available=false`). |
+| `TAU_QUALIFICATION_WINDOW_SIZE` | `3` | Most-recent, still-registered submissions kept at the queue head. |
+| `TAU_QUALIFICATION_BASE_PATH` | unset | Public base harness to diff submissions against; unset → degraded mode. |
 | `TAU_QUALIFICATION_POLL_SECONDS` | `10` | Idle poll interval. |
 | `TAU_QUALIFICATION_LLM_TIMEOUT` | `120` | Per-review LLM timeout (s). |
-| `TAU_QUALIFICATION_MAX_TOKENS` | `16000` | Output cap per review call. |
+| `TAU_QUALIFICATION_MAX_TOKENS` | `16000` | Output cap per review. |
 | `TAU_SECURITY_QUALIFICATION_MODEL` | `google/gemini-3.1-flash-lite` | Review model. |
-| `TAU_SECURITY_QUALIFICATION_*_MAX_CHARS` | see config | Per-section truncation caps for the reviewed patch/files. |
+| `TAU_SECURITY_QUALIFICATION_*_MAX_CHARS` | see [config.py](src/tau/qualification/config.py) | Per-section truncation caps for the reviewed patch/files. |
 
 ### task-generator tuning
 
@@ -766,16 +724,16 @@ authoritative, commented list). Grouped by concern:
 | `TAU_GENERATOR_LLM_ATTEMPTS` | `2` | LLM tries per commit before abandoning it. |
 | `TAU_GENERATOR_LLM_TIMEOUT` | `120` | Per-attempt LLM timeout (s). |
 | `TAU_GENERATOR_POLL_SECONDS` | `30` | Idle poll interval. |
-| `TAU_GENERATOR_QUALIFICATION_INFLIGHT_TARGET` | `100` | Real candidate/screening tasks maintained across incomplete pools so qualification solve fan-out remains production-shaped near the final slots. |
-| `TAU_GENERATOR_USE_DUMMY_LLM` + `TAU_GENERATOR_DUMMY_*` | off | Token-free fabricated descriptions for testing (see `.env.example`). |
+| `TAU_GENERATOR_QUALIFICATION_INFLIGHT_TARGET` | `100` | Real candidate/screening tasks maintained across incomplete pools so qualification fan-out stays production-shaped near the final slots. |
+| `TAU_GENERATOR_USE_DUMMY_LLM` + `TAU_GENERATOR_DUMMY_*` | off | Token-free fabricated descriptions for testing. |
 
 ### task-screener tuning
 
 | Var | Default | Effect |
 |-----|---------|--------|
 | `TAU_TASK_SCREEN_MODE` | `shadow` | `shadow` records scores but admits tasks; `enforce` applies the ceiling; `disabled` admits without an LLM/key. |
-| `TAU_TASK_SCREEN_MAX_KING_SCORE` | `0.70` | In enforce mode, disqualify when the normalized king score is strictly greater than this ceiling. |
-| `TAU_JUDGE_*` | see below | Screening shares the production duel judge's model, providers, reasoning, attempts, timeouts, and token cap. |
+| `TAU_TASK_SCREEN_MAX_KING_SCORE` | `0.70` | In enforce mode, disqualify when the normalized king score is strictly greater than this. |
+| `TAU_JUDGE_*` | see below | Screening shares the duel judge's model, providers, reasoning, attempts, timeouts, and token cap. |
 | `TAU_TASK_SCREEN_CONCURRENCY` | `5` | Task scores in flight. |
 | `TAU_TASK_SCREEN_POLL_SECONDS` | `10` | Idle poll interval. |
 | `TAU_TASK_SCREEN_MAX_FAILED_RUNS` | `3` | Failed runs before terminal `screening_exhausted` disqualification and pool refill. |
@@ -787,12 +745,12 @@ authoritative, commented list). Grouped by concern:
 | Var | Default | Effect |
 |-----|---------|--------|
 | `TAU_JUDGE_MODEL` | `z-ai/glm-5.2` | Primary judge model. |
-| `TAU_JUDGE_PROVIDER_ONLY` | `z-ai/fp8` | OpenRouter endpoint/provider allowlist for the primary judge model. |
-| `TAU_JUDGE_PROVIDER_ALLOW_FALLBACKS` | `false` | Disable OpenRouter provider fallback for the primary judge model. |
-| `TAU_JUDGE_FALLBACK_MODELS` | `z-ai/glm-5.2` | Comma-separated fallback judge models tried after the primary route. |
-| `TAU_JUDGE_FALLBACK_PROVIDER_ONLY` | `atlas-cloud/fp8` | OpenRouter provider allowlist for fallback judge models. |
+| `TAU_JUDGE_PROVIDER_ONLY` | `z-ai/fp8` | OpenRouter provider allowlist for the primary model. |
+| `TAU_JUDGE_PROVIDER_ALLOW_FALLBACKS` | `false` | Disable OpenRouter provider fallback for the primary route. |
+| `TAU_JUDGE_FALLBACK_MODELS` | `z-ai/glm-5.2` | Comma-separated fallback models tried after the primary route. |
+| `TAU_JUDGE_FALLBACK_PROVIDER_ONLY` | `atlas-cloud/fp8` | Provider allowlist for fallback models. |
 | `TAU_JUDGE_FALLBACK_PROVIDER_ALLOW_FALLBACKS` | `false` | Disable OpenRouter provider fallback for the fallback route. |
-| `TAU_JUDGE_MAX_TOKENS` | `32000` | Output cap per judge LLM call. |
+| `TAU_JUDGE_MAX_TOKENS` | `32000` | Output cap per judge call. |
 | `TAU_JUDGE_CONCURRENCY` | `5` | Judgements in flight. |
 | `TAU_JUDGE_ATTEMPTS` | `4` | LLM tries per round. |
 | `TAU_JUDGE_LLM_TIMEOUT` | `120` | Per-attempt timeout (s). |
@@ -804,19 +762,19 @@ authoritative, commented list). Grouped by concern:
 
 | Var | Default | Effect |
 |-----|---------|--------|
-| `TAU_POOL_ONE_TARGET` | `50` | Tasks to maintain in pool 1 for the king. |
-| `TAU_POOL_TWO_TARGET` | `50` | Tasks to maintain in pool 2 for the king. |
-| `TAU_DUEL_SCORING_METHOD` | `round_wins` code fallback; `mean` in `.env.example` | Resolve each completed pool by round wins or mean score. |
-| `TAU_DUEL_ROUND_WIN_MARGIN` | `0` | Extra margin in the rule `wins > losses + margin`. |
-| `TAU_DUEL_MEAN_SCORE_MARGIN` | `0.10` | In mean mode, the challenger's merged score must exceed the king's merged score by this amount. |
+| `TAU_POOL_ONE_TARGET` | `50` | Tasks maintained in pool 1 for the king. |
+| `TAU_POOL_TWO_TARGET` | `50` | Tasks maintained in pool 2 for the king. |
+| `TAU_DUEL_SCORING_METHOD` | `round_wins` code fallback; `mean` in `.env.example` | Resolve each pool by round wins or mean score. |
+| `TAU_DUEL_ROUND_WIN_MARGIN` | `0` | Extra margin in `wins > losses + margin`. |
+| `TAU_DUEL_MEAN_SCORE_MARGIN` | `0.10` | In mean mode, the challenger's merged score must exceed the king's by this. |
 | `TAU_DUEL_TOKEN_BONUS_ENABLED` | `false` code fallback; `true` in `.env.example` | Enable the symmetric per-task token modifier in mean mode. |
-| `TAU_DUEL_TOKEN_SCORE_TOLERANCE` | `0.05` | A side can earn a task saving when its quality is no more than this far behind. |
-| `TAU_DUEL_TOKEN_MIN_SCORE` | `0.20` | Minimum task quality required before token savings may help that side. |
-| `TAU_DUEL_TOKEN_BONUS_MULTIPLIER` | `0.15` | Multiply the full-pool average token saving by this amount before adding it to quality. |
+| `TAU_DUEL_TOKEN_SCORE_TOLERANCE` | `0.05` | A side can earn a saving when its quality is no more than this far behind. |
+| `TAU_DUEL_TOKEN_MIN_SCORE` | `0.20` | Minimum task quality before token savings may help a side. |
+| `TAU_DUEL_TOKEN_BONUS_MULTIPLIER` | `0.15` | Multiply the full-pool average saving by this before adding it to quality. |
 | `TAU_DUEL_POLL_SECONDS` | `5` | duel-resolver poll interval. |
-| `TAU_PROMOTION_PUBLISH_REPO` | unset | Optional GitHub repository that receives a promoted king's bundle. |
-| `TAU_PROMOTION_PUBLISH_BRANCH` | `main` | Branch used for optional king publication. |
-| `TAU_PROMOTION_GITHUB_TOKEN` | legacy token fallback | Token used for optional king publication. |
+| `TAU_PROMOTION_PUBLISH_REPO` | unset | Optional GitHub repo that receives a promoted king's bundle. |
+| `TAU_PROMOTION_PUBLISH_BRANCH` | `main` | Branch for optional king publication. |
+| `TAU_PROMOTION_GITHUB_TOKEN` | legacy token fallback | Token for optional king publication. |
 | `TAU_PROMOTION_PUBLISH_REQUIRED` | `false` | If true, do not crown the challenger unless publication succeeds. |
 
 ### weight-setter (on-chain emission)
@@ -837,21 +795,35 @@ authoritative, commented list). Grouped by concern:
 
 | Var | Default | Effect |
 |-----|---------|--------|
-| `TAU_DASHBOARD_HOST` | `0.0.0.0` (compose) | Bind address. |
+| `TAU_DASHBOARD_HOST` | `0.0.0.0` | Bind address. |
 | `TAU_DASHBOARD_PORT` | `8066` | In-container listen port. |
 | `TAU_DASHBOARD_HOST_PORT` | `8066` | Host port published on `127.0.0.1`. |
-| `TAU_DASHBOARD_RECENT_DUELS` | see config | How many recent duels the read model returns. |
-| `TAU_DASHBOARD_FRESH_SECONDS` | see config | Cache/freshness window for computed payloads. |
+| `TAU_DASHBOARD_RECENT_DUELS` | `40` | How many recent duels the read model returns. |
+| `TAU_DASHBOARD_FRESH_SECONDS` | `600` | Cache/freshness window for computed payloads. |
+
+### benchmark-worker (optional)
+
+| Var | Default | Effect |
+|-----|---------|--------|
+| `TAU_BENCHMARK_RESULTS_DIR` | `benchmark_results` | Per-king results folder. |
+| `TAU_BENCH_REPO_DIR` | `/root/subnet66/benchmark/ninja-benchmark--swe-bench-controller-2` | Benchmark suite checkout (has the runner + `.venv`). |
+| `TAU_BENCH_RUNNER_SCRIPT` | `run_agent_benchmark.py` | Suite entry point (relative to the repo dir). |
+| `TAU_BENCH_MODEL` | `qwen/qwen3.6-27b` | Model the king's agent must use. Set to the live `SOLVER_MODEL` to match production. |
+| `TAU_BENCH_SLICE` | `0:50` | Instance slice per king (`""` = full set). |
+| `TAU_BENCH_WORKERS` | `4` | Concurrent agent containers. |
+| `TAU_BENCH_TIMEOUT_SECONDS` | `21600` | Max wall-clock for one king's benchmark per tick. |
+| `TAU_BENCHMARK_POLL_SECONDS` | `60` | Poll interval. |
+| `TAU_BENCH_*` sampling (`TEMPERATURE`, `TOP_P`, `SAMPLING_JSON`, …) | see [config.py](src/tau/workers/benchmark/config.py) | Pin sampling for reproducibility. |
 
 ### task-solver & proxy
 
 | Var | Default | Effect |
 |-----|---------|--------|
-| `SOLVER_MODEL` | required | Model the proxy forces every agent request onto. Set it in `.env`. |
-| `MAX_CONTAINERS` | `4` code fallback; `100` in `.env.example` | Max concurrently running qualification and duel sandboxes. Size this to host and upstream capacity. |
-| `TAU_SOLVER_POLL_SECONDS` | `30` | Idle poll interval; while work is running, free slots are refilled about once per second. |
+| `SOLVER_MODEL` | required | Model the proxy forces on every agent request. |
+| `MAX_CONTAINERS` | `4` code fallback; `100` in `.env.example` | Max concurrent qualification + duel sandboxes. Size to host and upstream capacity. |
+| `TAU_SOLVER_POLL_SECONDS` | `30` | Idle poll interval; while work runs, free slots refill about once a second. |
 | `TAU_SOLVER_QUALIFY_MIN_CHANGED_LINES` | `1` | Min diff lines the king must change before a task advances to screening. |
-| `TAU_SOLVER_REQUIRE_FULL_POOL_FOR_DUELS` | `false` code fallback; `true` in `.env.example` | Additional active-pool safety gate before scheduling duel solves. New challenges always wait for both pools to reach their QUALIFIED targets. |
+| `TAU_SOLVER_REQUIRE_FULL_POOL_FOR_DUELS` | `false` code fallback; `true` in `.env.example` | Extra active-pool gate before scheduling duel solves. New challenges always wait for both pools to reach their QUALIFIED targets. |
 | `TAU_SUBMISSIONS_DIR` | `submissions` | Host dir of extracted submissions (mounted read-only, same path). |
 | `TAU_SANDBOX_WORK_ROOT` | system temp | Host dir for per-solve work trees (**same path host↔container**). |
 | `SOLVER_MAX_REQUESTS` / `_TOTAL_TOKENS` / `_COST` / `_TOKENS_PER_REQUEST` | unbounded | Per-solve spend caps. **Strongly advised** — untrusted code drives the spend. |
@@ -881,44 +853,42 @@ authoritative, commented list). Grouped by concern:
 
 ## 12. Post-deployment tuning
 
-**Takes effect on restart, no rebuild.** Almost all tuning knobs are read at
-worker startup. Edit `.env`, then recreate the affected service:
+**Takes effect on restart, no rebuild.** Almost all tuning knobs are read at worker
+startup. Edit `.env`, then recreate the affected service:
 
 ```bash
 docker compose up -d --force-recreate task-solver     # one service
 docker compose up -d --force-recreate                  # all
 ```
 
-This covers every `TAU_*`, `SOLVER_*`, model, poll-interval, pool-target,
-spend-cap, sandbox-hardening, and `AXIOM_*` variable, plus `LLM_PROVIDER` and
-chain settings.
+This covers every `TAU_*`, `SOLVER_*`, model, poll-interval, pool-target, spend-cap,
+sandbox-hardening, and `AXIOM_*` variable, plus `LLM_PROVIDER` and chain settings.
 
-**Requires a rebuild** (`docker compose build <service>`): the image build args
-`EXTRA`, `WORKER`, and `INSTALL_GIT` — i.e. adding a worker or changing its
-dependency set.
+**Requires a rebuild** (`docker compose build <service>`): the image build args `EXTRA`,
+`WORKER`, and `INSTALL_GIT` — i.e. adding a worker or changing its dependency set.
 
 **Do not change on a live database:** `POSTGRES_USER` / `POSTGRES_PASSWORD` /
-`POSTGRES_DB` (they only apply on first init; changing them later needs a manual
-migration). `TAU_SUBMISSIONS_DIR` / `TAU_SANDBOX_WORK_ROOT` must stay in sync
-with the compose mounts if changed.
+`POSTGRES_DB` (they apply only on first init; changing them later needs a manual
+migration). `TAU_SUBMISSIONS_DIR` / `TAU_SANDBOX_WORK_ROOT` must stay in sync with the
+compose mounts if changed.
 
 ---
 
 ## 13. Local development
 
 - **Dry-run the solver end-to-end** — [examples/task_solver/README.md](examples/task_solver/README.md).
-  Use [seed_duel.py](examples/task_solver/seed_duel.py) to crown a king and set
-  up challengers (`--scaffold` creates token-free dummy agents), run the
-  `task-solver`, then inspect with [show_state.py](examples/task_solver/show_state.py).
+  Use [seed_duel.py](examples/task_solver/seed_duel.py) to crown a king and set up
+  challengers (`--scaffold` creates token-free dummy agents), run `task-solver`, then
+  inspect with [show_state.py](examples/task_solver/show_state.py).
 - **Solve a single task in isolation** (no DB, no worker loop) —
-  [scripts/solve_one.py](scripts/solve_one.py): mine or reuse a task, run one
-  agent in the sandbox, print the result/diff (`--trace` streams the LLM calls).
+  [scripts/solve_one.py](scripts/solve_one.py): mine or reuse a task, run one agent in
+  the sandbox, print the result/diff (`--trace` streams the LLM calls).
 - **Inspect the commit sampler** — [scripts/sample_commit.py](scripts/sample_commit.py)
   (`--json`, `--patch`, `--seed`).
 - **Check GitHub token quota** — [scripts/check_github_quota.py](scripts/check_github_quota.py).
-- **Tests:** `uv run pytest`. Postgres-gated tests use a **separate**
-  `TAU_TEST_DATABASE_URL` database that is dropped/recreated around each test —
-  never point it at real data.
+- **Tests:** `uv run pytest`. Postgres-gated tests use a separate
+  `TAU_TEST_DATABASE_URL` database that is dropped/recreated around each test — never
+  point it at real data.
 
 ---
 
@@ -935,10 +905,10 @@ src/tau/
   github/             # commit sampler, token rotation, client
   taskgen/            # commit → problem-statement description + fingerprint
   qualification/      # submission security-review prompt, policy, scoring
-  task_screening/     # single-candidate difficulty prompt, parser, and scorer
+  task_screening/     # single-candidate difficulty prompt, parser, scorer
   judging/            # blinding, prompt, parsing, injection safety
   duel/               # pure decision logic (decide/predicates/snapshot/actions)
-  weights/            # emission split across the rolling king window + cadence
+  weights/            # emission split across the king window + cadence gate
   sandbox/            # docker-out-of-docker runner, network, harness, hardening
   proxy/              # in-process LLM proxy: budget, upstream, cache, rollout
   openrouter/         # shared OpenRouter LLM client
@@ -956,16 +926,16 @@ compose.yaml          # the full stack
 
 ## 15. Regenerating the diagrams
 
-All diagrams are authored as Mermaid sources in
-[docs/diagrams/](docs/diagrams/) (`*.mmd`) and rendered to `*.png`. To
-re-render after editing a source (needs only Docker — no local Node/Chromium):
+Diagrams are authored as Mermaid sources in [docs/diagrams/](docs/diagrams/) (`*.mmd`)
+and rendered to `*.png`. To re-render after editing a source (needs only Docker — no
+local Node/Chromium):
 
 ```bash
 cd docs/diagrams
-./render.sh                 # render every *.mmd
+./render.sh                       # render every *.mmd
 ./render.sh system-overview.mmd   # or a single file
 ```
 
 The script uses the `minlag/mermaid-cli` image with the pinned
-[puppeteer-config.json](docs/diagrams/puppeteer-config.json). Keep the `.mmd`
-sources as the source of truth and commit the regenerated `.png` alongside.
+[puppeteer-config.json](docs/diagrams/puppeteer-config.json). Keep the `.mmd` sources as
+the source of truth and commit the regenerated `.png` alongside.

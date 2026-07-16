@@ -1,5 +1,6 @@
 %%{init: {"theme": "base", "themeVariables": {"fontSize": "14px"}}}%%
 erDiagram
+    submissions ||--o| submission_qualifications : "security reviewed"
     submissions ||--o| kings : "crowned as"
     submissions ||--o| challenges : "challenges as"
     kings ||--o{ challenges : "contested by"
@@ -21,7 +22,19 @@ erDiagram
         bigint block
         text hotkey
         jsonb agent_files
-        int status_id "SubmissionStatus"
+        int status_id "SubmissionStatus 0/1/2/3"
+    }
+    submission_qualifications {
+        text submission_id PK "FK submissions"
+        text outcome "qualified/needs_review/disqualified/error"
+        text verdict "pass/warn/fail"
+        int overall_score
+        int security_score
+        text model
+        text risks
+        text failures
+        bool base_files_available
+        text error "set = infra retry, stays UNVERIFIED"
     }
     kings {
         text king_id PK "FK submissions; latest = reigning"
