@@ -298,6 +298,53 @@ services:
         condition: service_completed_successfully
     restart: unless-stopped
 
+  # Benchmark worker: watch the `kings` table and benchmark each new king's
+  # submitted agent against SWE-bench Pro (console script `benchmark-worker`).
+  #
+  # NOT enabled as a built service yet: unlike the other workers it does not run
+  # self-contained from this repo's image. It shells out to the benchmark suite's
+  # run_agent_benchmark.py and drives docker-out-of-docker to pull/run multi-GB sweap
+  # images. First cut: run it ON THE HOST (as the suite runs today):
+  #
+  #   cd /root/subnet66/tau            # (the ninja-validator checkout)
+  #   DATABASE_URL=... \
+  #   TAU_SUBMISSIONS_DIR=/root/subnet66/tau/workspace/validate/netuid-66/private-submissions \
+  #   TAU_BENCHMARK_RESULTS_DIR=/root/subnet66/benchmark/benchmark_results \
+  #   TAU_BENCH_REPO_DIR=/root/subnet66/benchmark/ninja-benchmark--swe-bench-controller-2 \
+  #   TAU_BENCH_MODEL=qwen/qwen3-coder  TAU_BENCH_SLICE=0:50 \
+  #   OPENROUTER_API_KEY=sk-or-... \
+  #   uv run benchmark-worker
+  #
+  # To containerize later, a service would need: the host docker socket
+  # (/var/run/docker.sock), the submissions dir mounted read-only at the SAME path
+  # (TAU_SUBMISSIONS_DIR), the benchmark suite + its .venv available at
+  # TAU_BENCH_REPO_DIR, a writable results volume (TAU_BENCHMARK_RESULTS_DIR), and
+  # OPENROUTER_API_KEY. Sketch (fill in the suite delivery before enabling):
+  #
+  # benchmark-worker:
+  #   build:
+  #     context: .
+  #     dockerfile: deploy/worker/Dockerfile
+  #     args:
+  #       EXTRA: benchmark
+  #       WORKER: benchmark-worker
+  #       INSTALL_GIT: "true"
+  #   container_name: pg_stack_benchmark_worker
+  #   env_file: .env
+  #   environment:
+  #     DATABASE_URL: postgresql+psycopg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB}
+  #     TAU_BENCH_REPO_DIR: /opt/benchmark/ninja-benchmark--swe-bench-controller-2
+  #     TAU_BENCHMARK_RESULTS_DIR: /srv/tau/benchmark_results
+  #   volumes:
+  #     - /var/run/docker.sock:/var/run/docker.sock
+  #     - ${TAU_SUBMISSIONS_DIR:-/srv/tau/submissions}:${TAU_SUBMISSIONS_DIR:-/srv/tau/submissions}:ro
+  #     - ${TAU_BENCH_REPO_ROOT:-/root/subnet66/benchmark}:/opt/benchmark:ro
+  #     - ${TAU_BENCHMARK_RESULTS_DIR:-/srv/tau/benchmark_results}:/srv/tau/benchmark_results
+  #   depends_on:
+  #     db: { condition: service_healthy }
+  #     migrate: { condition: service_completed_successfully }
+  #   restart: unless-stopped
+
 volumes:
   pgdata:
     driver: local
