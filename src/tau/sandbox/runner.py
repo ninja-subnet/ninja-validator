@@ -34,6 +34,7 @@ import threading
 import time
 import uuid
 from pathlib import Path
+from typing import Any
 
 import docker
 from docker.errors import NotFound
@@ -87,6 +88,7 @@ def run_agent_in_container(
     """Execute *req* in a fresh sandbox and return its outcome (never raises)."""
     start = time.monotonic()
     token = uuid.uuid4().hex[:12]
+    rollout_events: list[dict[str, Any]] = []
     net = None
     self_ctr = self_container(client)
     proxy = LLMProxy(
@@ -98,6 +100,10 @@ def run_agent_in_container(
         solve_budget=req.budget,
         upstream_read_timeout_seconds=config.proxy_request_timeout_seconds,
         smart_cache_routing=config.smart_cache_routing and upstream.endpoint_count > 1,
+        rollout_event_sink=(
+            rollout_events.append if config.rollout_capture_enabled else None
+        ),
+        rollout_capture_bodies=config.rollout_capture_enabled,
     )
     container = None
     workdir: Path | None = None
@@ -200,6 +206,11 @@ def run_agent_in_container(
             elapsed_seconds=time.monotonic() - start,
             usage=usage,
             error=error,
+            rollout_events=(
+                _ordered_rollout_events(rollout_events)
+                if config.rollout_capture_enabled
+                else None
+            ),
         )
     except Exception as exc:  # noqa: BLE001 — a sandbox failure is a result, not a crash
         log.exception("sandbox run failed for task %s", req.task_id)
@@ -210,6 +221,11 @@ def run_agent_in_container(
             elapsed_seconds=time.monotonic() - start,
             usage=_safe_usage(proxy),
             error=str(exc),
+            rollout_events=(
+                _ordered_rollout_events(rollout_events)
+                if config.rollout_capture_enabled
+                else None
+            ),
         )
     finally:
         _cleanup(container, proxy)
@@ -219,6 +235,20 @@ def run_agent_in_container(
 
 def _task_seed(task_id: str) -> int:
     return stable_seed(task_id)
+
+
+def _ordered_rollout_events(
+    events: list[dict[str, Any]],
+) -> tuple[dict[str, Any], ...]:
+    """Freeze proxy events in request-start order and add a stable call index."""
+    ordered = sorted(
+        events,
+        key=lambda event: (
+            str(event.get("started_at") or ""),
+            str(event.get("finished_at") or ""),
+        ),
+    )
+    return tuple({"index": index, **event} for index, event in enumerate(ordered))
 
 
 def _task_sampling_params(task_id: str) -> dict[str, float | int]:

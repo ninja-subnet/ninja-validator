@@ -301,6 +301,9 @@ def _qualify(
             king_submission_id=job.submission_id,
             qualified=False,
             solution="",
+            duration=0.0,
+            exit_reason="task_setup_failed",
+            success=False,
         )
         log.warning(
             "qualification task=%s king=%s setup failed; marking DISQUALIFIED (%s)",
@@ -345,6 +348,11 @@ def _qualify(
         king_submission_id=job.submission_id,
         qualified=qualified,
         solution=result.solution_diff,
+        duration=result.elapsed_seconds,
+        exit_reason=result.exit_reason,
+        success=result.success,
+        usage_summary=result.usage.to_dict() if result.usage is not None else None,
+        rollout_events=result.rollout_events,
     )
     log.info(
         "qualification task=%s king=%s -> %s (exit=%s, %d changed lines)",
@@ -416,6 +424,8 @@ def _solve_duel(
         duration=result.elapsed_seconds,
         exit_reason=result.exit_reason,
         usage_summary=result.usage.to_dict() if result.usage is not None else None,
+        success=result.success,
+        rollout_events=result.rollout_events,
     )
     log.info(
         "duel solve task=%s challenge=%s submission=%s exit=%s success=%s",

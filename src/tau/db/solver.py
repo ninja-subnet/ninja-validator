@@ -19,8 +19,9 @@ full ``database.py``, so it can ship independently.
 from __future__ import annotations
 
 import hashlib
+import json
 import logging
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
@@ -29,6 +30,7 @@ from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.orm import aliased
 
 from tau.pools import PoolTargets
+from tau.rollouts import rollout_id
 
 from . import models
 from .engine import create_db_engine, session_factory, session_scope
@@ -131,6 +133,11 @@ class SolverDb:
         king_submission_id: str,
         qualified: bool,
         solution: str,
+        duration: float = 0.0,
+        exit_reason: str = "completed",
+        success: bool | None = None,
+        usage_summary: Mapping[str, Any] | None = None,
+        rollout_events: Sequence[Mapping[str, Any]] | None = None,
     ) -> None:
         """Record the king solve and advance a CANDIDATE atomically.
 
@@ -169,6 +176,19 @@ class SolverDb:
                     king_submission_id,
                 )
                 return
+            _insert_rollout(
+                session,
+                phase="qualification",
+                task_id=task_id,
+                submission_id=king_submission_id,
+                challenger_submission_id=None,
+                success=success,
+                solution=solution,
+                duration=duration,
+                exit_reason=exit_reason,
+                usage_summary=usage_summary,
+                rollout_events=rollout_events,
+            )
             if qualified:
                 session.execute(
                     insert(models.TaskScreening).values(
@@ -299,12 +319,15 @@ class SolverDb:
         duration: float,
         exit_reason: str,
         usage_summary: Mapping[str, Any] | None = None,
+        success: bool | None = None,
+        rollout_events: Sequence[Mapping[str, Any]] | None = None,
     ) -> None:
         """Insert a fresh challenge-scoped solution row.
 
         Idempotent on ``(task_id, challenger_submission_id, submission_id)`` so a
         retry/race keeps the first terminal solve for that side of that round.
         """
+        safe_usage = _sanitize_usage_summary(usage_summary)
         with session_scope(self._sessions) as session:
             session.execute(
                 insert(models.DuelTaskSolution)
@@ -315,7 +338,7 @@ class SolverDb:
                     solution=solution,
                     duration=duration,
                     exit_reason=exit_reason,
-                    usage_summary=_sanitize_usage_summary(usage_summary),
+                    usage_summary=safe_usage,
                 )
                 .on_conflict_do_nothing(
                     index_elements=[
@@ -324,6 +347,20 @@ class SolverDb:
                         "submission_id",
                     ]
                 )
+            )
+            _insert_rollout(
+                session,
+                phase="duel",
+                task_id=task_id,
+                submission_id=submission_id,
+                challenger_submission_id=challenger_submission_id,
+                success=success,
+                solution=solution,
+                duration=duration,
+                exit_reason=exit_reason,
+                usage_summary=safe_usage,
+                rollout_events=rollout_events,
+                usage_is_sanitized=True,
             )
 
     def save_task_solution(
@@ -383,6 +420,68 @@ def _duel_job_for_side(row: Any, *, side: str) -> DuelSolveJob:
         repo_clone_url=row.repo_clone_url,
         base_commit=row.parent_sha,
     )
+
+
+def _insert_rollout(
+    session: Any,
+    *,
+    phase: str,
+    task_id: str,
+    submission_id: str,
+    challenger_submission_id: str | None,
+    success: bool | None,
+    solution: str,
+    duration: float,
+    exit_reason: str,
+    usage_summary: Mapping[str, Any] | None,
+    rollout_events: Sequence[Mapping[str, Any]] | None,
+    usage_is_sanitized: bool = False,
+) -> None:
+    """Insert the normalized rollout in the caller's solution transaction."""
+    safe_usage = (
+        dict(usage_summary) if usage_summary is not None else None
+    ) if usage_is_sanitized else _sanitize_usage_summary(usage_summary)
+    session.execute(
+        insert(models.Rollout)
+        .values(
+            rollout_id=rollout_id(
+                phase=phase,
+                task_id=task_id,
+                submission_id=submission_id,
+                challenger_submission_id=challenger_submission_id,
+            ),
+            phase=phase,
+            task_id=task_id,
+            submission_id=submission_id,
+            challenger_submission_id=challenger_submission_id,
+            success=success,
+            solution_diff=solution,
+            duration_seconds=duration,
+            exit_reason=exit_reason,
+            usage_summary=safe_usage,
+            events=_sanitize_rollout_events(rollout_events),
+        )
+        .on_conflict_do_nothing(index_elements=["rollout_id"])
+    )
+
+
+def _sanitize_rollout_events(
+    events: Sequence[Mapping[str, Any]] | None,
+) -> list[dict[str, Any]] | None:
+    """Copy JSON-safe proxy events without making solve persistence fragile."""
+    if events is None:
+        return None
+    output: list[dict[str, Any]] = []
+    for event in events:
+        try:
+            encoded = json.dumps(dict(event), ensure_ascii=False, allow_nan=False)
+            decoded = json.loads(encoded)
+        except (TypeError, ValueError):
+            log.warning("dropping non-JSON rollout event", exc_info=True)
+            continue
+        if isinstance(decoded, dict):
+            output.append(decoded)
+    return output
 
 
 def _sanitize_usage_summary(

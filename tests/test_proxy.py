@@ -116,6 +116,47 @@ def test_injects_upstream_key_and_enforces_model(proxy_with_model) -> None:
     assert call["payload"]["tools"] == _TOOLS
 
 
+def test_rollout_capture_records_bodies_and_redacts_proxy_secrets() -> None:
+    fake = FakeUpstream()
+    events: list[dict] = []
+    proxy = LLMProxy(
+        _UPSTREAM,
+        bind_host="127.0.0.1",
+        bind_port=0,
+        enforced_model="enforced/model",
+        auth_token="solve-secret",
+        rollout_event_sink=events.append,
+        rollout_capture_bodies=True,
+    )
+    gen = _running(proxy, fake)
+    proxy = next(gen)
+    try:
+        response = _post(
+            proxy,
+            proxy.auth_token,
+            {
+                **_BODY,
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": "UPSTREAM-KEY and solve-secret must not persist",
+                    }
+                ],
+            },
+        )
+        assert response.status_code == 200
+    finally:
+        next(gen, None)
+
+    assert len(events) == 1
+    encoded = json.dumps(events[0])
+    assert "UPSTREAM-KEY" not in encoded
+    assert "solve-secret" not in encoded
+    assert encoded.count("[redacted]") == 2
+    assert events[0]["request"]["model"] == "enforced/model"
+    assert events[0]["response"]["choices"][0]["message"]["content"] == "hi"
+
+
 def test_enforces_validator_seed_over_miner_seed() -> None:
     fake = FakeUpstream()
     proxy = LLMProxy(

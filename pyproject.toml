@@ -19,14 +19,15 @@ dependencies = [
 [project.optional-dependencies]
 # Alembic runs only in the migration image (deploy/migrate), not the workers.
 migrate = ["alembic==1.16.1"]
-# Empty per-worker placeholders: all worker deps are core, but each EXTRA build-arg
-# (deploy/worker/Dockerfile) still needs a matching extra to resolve.
+# Per-worker extras: most are empty because their deps are core, but every EXTRA
+# build-arg (deploy/worker/Dockerfile) needs a matching group to resolve.
 bittensor = []
 judge = []
 dashboard = []
 task-screener = []
 task-generator = []
 duel-resolver = []
+hf-archiver = ["huggingface-hub>=0.34", "pyarrow>=18"]
 qualification = []
 weight-setter = []
 task-solver = []
@@ -41,9 +42,11 @@ task-screener = "tau.workers.task_screener:main"
 task-generator = "tau.workers.task_generator:main"
 qualification-worker = "tau.workers.qualification:main"
 duel-resolver = "tau.workers.duel_resolver:main"
+hf-archiver = "tau.workers.hf_archiver:main"
 task-solver = "tau.workers.task_solver:main"
 weight-setter = "tau.workers.weight_setter:main"
 tau-prune-disabled-upstreams = "tau.proxy.env_prune:main"
+tau-export-hf = "tau.huggingface:main"
 
 [build-system]
 requires = ["uv_build>=0.11.3,<0.12.0"]

@@ -233,7 +233,7 @@ services:
       context: .
       dockerfile: deploy/worker/Dockerfile
       args:
-        EXTRA: duel-resolver   # [project.optional-dependencies] group (empty; deps are core)
+        EXTRA: duel-resolver
         WORKER: duel-resolver  # [project.scripts] console script to run
     container_name: pg_stack_duel_resolver
     env_file: .env
@@ -243,6 +243,28 @@ services:
       # GitHub king promotion reads the winning bundle before committing it.
       # Mount the host directory at the same path used by TAU_SUBMISSIONS_DIR.
       - ${TAU_SUBMISSIONS_DIR:-/srv/tau/submissions}:${TAU_SUBMISSIONS_DIR:-/srv/tau/submissions}:ro
+    depends_on:
+      db:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    restart: unless-stopped
+
+  # Retired-king exports are queued transactionally during promotion and processed
+  # here so a slow or unavailable dataset host can never delay crowning.
+  hf-archiver:
+    build:
+      context: .
+      dockerfile: deploy/worker/Dockerfile
+      args:
+        EXTRA: hf-archiver
+        WORKER: hf-archiver
+    container_name: pg_stack_hf_archiver
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB}
+    volumes:
+      - ${TAU_HF_STAGING_DIR:-/var/lib/tau/hf-staging}:${TAU_HF_STAGING_DIR:-/var/lib/tau/hf-staging}
     depends_on:
       db:
         condition: service_healthy

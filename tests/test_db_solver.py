@@ -22,6 +22,7 @@ from tau.db.models import (
     Challenge,
     DuelTaskSolution,
     King,
+    Rollout,
     Submission,
     Task,
     TaskScreening,
@@ -213,6 +214,13 @@ def test_finish_qualification_viable_moves_to_pending_and_records_solve(
         king_submission_id="king-1",
         qualified=True,
         solution="diff --git a/x b/x",
+        duration=1.2,
+        exit_reason="completed",
+        success=True,
+        usage_summary={"request_count": 1, "total_tokens": 9},
+        rollout_events=[
+            {"index": 0, "type": "llm_call", "request": {"model": "m"}}
+        ],
     )
     with session_scope(session_factory(db._engine)) as session:  # noqa: SLF001
         task = session.get(Task, "t1")
@@ -222,6 +230,13 @@ def test_finish_qualification_viable_moves_to_pending_and_records_solve(
         assert screening.qualification_solution == "diff --git a/x b/x"
         assert screening.reason is None
         assert screening.king_score is None
+        rollout = session.scalars(select(Rollout)).one()
+        assert rollout.phase == "qualification"
+        assert rollout.success is True
+        assert rollout.usage_summary == {"request_count": 1, "total_tokens": 9}
+        assert rollout.events == [
+            {"index": 0, "type": "llm_call", "request": {"model": "m"}}
+        ]
 
 
 def test_finish_qualification_non_viable_disqualifies_without_screening(
@@ -271,6 +286,7 @@ def test_finish_qualification_ignores_stale_non_candidate_completion(
     with session_scope(session_factory(db._engine)) as session:  # noqa: SLF001
         assert session.get(Task, "t1").status_id == int(TaskStatus.DISQUALIFIED)
         assert session.get(TaskScreening, "t1") is None
+        assert session.scalars(select(Rollout)).all() == []
 
 
 # -- phase B: fresh duel solves ----------------------------------------------------
@@ -426,7 +442,36 @@ def test_save_duel_task_solution_is_idempotent(db: SolverDb) -> None:
         )
     with session_scope(session_factory(db._engine)) as session:  # noqa: SLF001
         rows = session.scalars(select(DuelTaskSolution)).all()
+        rollout_rows = session.scalars(select(Rollout)).all()
     assert len(rows) == 1
+    assert len(rollout_rows) == 1
+
+
+def test_save_duel_task_solution_persists_full_rollout(db: SolverDb) -> None:
+    _seed_active_challenge(db)
+    db.save_duel_task_solution(
+        task_id="t1",
+        challenger_submission_id="sub-chal",
+        submission_id="sub-chal",
+        solution="diff",
+        duration=1.0,
+        exit_reason="completed",
+        success=True,
+        rollout_events=[
+            {
+                "index": 0,
+                "type": "llm_call",
+                "request": {"messages": [{"role": "user", "content": "task"}]},
+                "response": {"choices": [{"message": {"content": "answer"}}]},
+            }
+        ],
+    )
+    with session_scope(session_factory(db._engine)) as session:  # noqa: SLF001
+        rollout = session.scalars(select(Rollout)).one()
+
+    assert rollout.phase == "duel"
+    assert rollout.challenger_submission_id == "sub-chal"
+    assert rollout.events[0]["request"]["messages"][0]["content"] == "task"
 
 
 def test_save_duel_task_solution_keeps_only_safe_usage_summary(db: SolverDb) -> None:

@@ -1,10 +1,9 @@
 """Minimal rollout-event helpers vendored for the proxy's optional event sink.
 
-The proxy can emit one ``llm_call`` event per upstream request to a caller-supplied
-sink. There is no rollout *store* in this repo yet (a documented follow-up), so the
-sink defaults to ``None`` and these helpers are exercised only when a caller wires
-one in. Ported down to the essentials from the legacy ``tau.rollouts.schema`` /
-``tau.rollouts.redaction``.
+The proxy emits one ``llm_call`` event per upstream request to a caller-supplied
+sink. The sandbox runner wires this to the durable ``rollouts`` DB record when
+capture is enabled. Ported down to the essentials from the legacy
+``tau.rollouts.schema`` / ``tau.rollouts.redaction``.
 """
 
 from __future__ import annotations
