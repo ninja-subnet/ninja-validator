@@ -46,6 +46,8 @@ class SandboxConfig:
     # read timeout). A timeout is treated as a miner-unrelated infra fault (retry).
     proxy_request_timeout_seconds: float = 600.0
     smart_cache_routing: bool = True
+    # Persist redacted request/response bodies for training/evaluation exports.
+    rollout_capture_enabled: bool = True
 
     def memswap_limit(self) -> str:
         # Equal to memory => the container gets no swap.
@@ -91,5 +93,8 @@ class SandboxConfig:
             ),
             smart_cache_routing=env_bool(
                 env, "TAU_SOLVER_SMART_CACHE_ROUTING", d.smart_cache_routing
+            ),
+            rollout_capture_enabled=env_bool(
+                env, "TAU_ROLLOUT_CAPTURE_ENABLED", d.rollout_capture_enabled
             ),
         )

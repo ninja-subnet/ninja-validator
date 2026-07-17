@@ -348,6 +348,15 @@ against races even though it never holds locks across ticks.
   configured margins, and `outcome`.
 - **Crowns** a new king on a POOL_TWO win by inserting into `kings`
   (`ON CONFLICT DO NOTHING`).
+- **Queues** the retiring king's Hugging Face archive in the same transaction as
+  crowning. A separate `hf-archiver` streams bounded DB batches into compressed,
+  disk-backed shards and retries from persistent state, so Hub latency or failure
+  cannot delay promotion. The default `rollouts` table plus the
+  `tasks`, one-row-per-call `events`, and complete chunked `payloads` tables are
+  flattened native Parquet for a responsive Dataset Viewer. The payload rows retain
+  every request/response character while avoiding oversized cells; lossless raw
+  JSONL is gzip-compressed under `data/raw/`. Upload paths are deterministic, so a
+  retry overwrites rather than duplicates examples.
 - **Drains safely:** `SIGUSR1` lets the active duel finish but blocks the next
   challenge; `SIGUSR2` resumes opening challenges.
 - In mean mode, token efficiency modifies both sides symmetrically. On each task,
@@ -545,6 +554,11 @@ docker compose logs migrate     # confirm "alembic upgrade head" succeeded
   `QUALIFIED` tasks. Calibrate the score distribution before changing
   `TAU_TASK_SCREEN_MODE=enforce`; that mode change applies only to newly screened
   tasks unless the pool is deliberately rebuilt again.
+- **Backfill old kings to Hugging Face:** after configuring `TAU_HF_DATASET_REPO`
+  and `HF_TOKEN`, run `uv run --extra duel-resolver tau-export-hf`. Existing task,
+  patch, usage, screening, and judgement data is exported; request/response events
+  from before rollout capture are marked `capture_available=false` because they
+  cannot be reconstructed.
 - **task-solver requirements:** it mounts `/var/run/docker.sock`, mounts
   `TAU_SUBMISSIONS_DIR` read-only, and mounts `TAU_SANDBOX_WORK_ROOT` at the
   **same path on host and in the container**. That same-path rule is mandatory:
@@ -693,6 +707,16 @@ authoritative, commented list). Grouped by concern:
 | `TAU_PROMOTION_PUBLISH_BRANCH` | `main` | Branch used for optional king publication. |
 | `TAU_PROMOTION_GITHUB_TOKEN` | legacy token fallback | Token used for optional king publication. |
 | `TAU_PROMOTION_PUBLISH_REQUIRED` | `false` | If true, do not crown the challenger unless publication succeeds. |
+| `TAU_HF_DATASET_REPO` | unset | Dataset repo receiving deterministic retired-king JSONL shards. |
+| `HF_TOKEN` / `TAU_HF_TOKEN` | unset | Hugging Face write token (`TAU_HF_TOKEN` takes precedence). |
+| `TAU_HF_DATASET_PRIVATE` | `true` | Create/keep the dataset private by default. |
+| `TAU_HF_DATASET_REVISION` | `main` | Dataset branch receiving promotion commits. |
+| `TAU_HF_STAGING_DIR` | `/var/lib/tau/hf-staging` | Disk-backed staging root for bounded archive shards. |
+| `TAU_HF_EXPORT_BATCH_SIZE` | `25` | Maximum rollout rows decoded and transformed at once. |
+| `TAU_HF_SHARD_SIZE_MB` | `512` | Approximate maximum uncompressed rows per output shard. |
+| `TAU_HF_POLL_SECONDS` | `15` | Idle archive-queue poll interval. |
+| `TAU_HF_LEASE_SECONDS` | `21600` | Time before an abandoned processing job can be reclaimed. |
+| `TAU_HF_RETRY_BASE_SECONDS` / `_MAX_SECONDS` | `60` / `3600` | Persistent exponential retry window. |
 
 ### task-solver & proxy
 
@@ -707,6 +731,7 @@ authoritative, commented list). Grouped by concern:
 | `TAU_SANDBOX_WORK_ROOT` | system temp | Host dir for per-solve work trees (**same path host↔container**). |
 | `SOLVER_MAX_REQUESTS` / `_TOTAL_TOKENS` / `_COST` / `_TOKENS_PER_REQUEST` | unbounded | Per-solve spend caps. **Strongly advised** — untrusted code drives the spend. |
 | `TAU_PROXY_REQUEST_TIMEOUT_SECONDS` | `600` | Upstream read timeout; a timeout is a retryable infra fault. |
+| `TAU_ROLLOUT_CAPTURE_ENABLED` | `true` | Persist redacted per-call request/response events with terminal solve rollouts. |
 
 ### Sandbox hardening (`TAU_SANDBOX_*`)
 

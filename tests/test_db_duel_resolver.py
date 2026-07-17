@@ -29,9 +29,12 @@ from tau.db.models import (
     DuelTaskSolution,
     Judgement,
     King,
+    KingArchive,
     Registration,
+    Rollout,
     Submission,
     Task,
+    TaskScreening,
     TaskSolution,
 )
 from tau.db.status import (
@@ -43,6 +46,7 @@ from tau.db.status import (
 )
 from tau.duel import ActiveChallenge, DuelScoringMethod, Tally, TokenEfficiencyConfig
 from tau.pools import PoolTargets
+from tau.rollouts import rollout_id
 
 load_dotenv(Path(__file__).resolve().parent.parent / ".env")
 _TEST_URL = os.environ.get("TAU_TEST_DATABASE_URL")
@@ -809,6 +813,10 @@ async def test_promote_crowns_the_challenger_and_records(db: DuelResolverDb) -> 
     assert await _challenge_status(db) == int(ChallengeStatus.CLOSED)
     async with async_session_scope(db._sessions) as session:  # noqa: SLF001
         assert await session.get(King, "c") is not None  # the challenger now reigns
+        archive = await session.get(KingArchive, "k")
+        assert archive is not None
+        assert archive.promoted_to == "c"
+        assert archive.status == "pending"
     rows = await _resolutions(db)
     assert len(rows) == 1
     assert rows[0].pool_type == int(PoolType.POOL_TWO)
@@ -827,3 +835,111 @@ async def test_promote_is_a_noop_when_not_in_pool_two(db: DuelResolverDb) -> Non
     async with async_session_scope(db._sessions) as session:  # noqa: SLF001
         assert await session.get(King, "c") is None
     assert await _resolutions(db) == []
+
+
+async def test_export_king_dataset_normalizes_new_and_legacy_rollouts(
+    db: DuelResolverDb,
+) -> None:
+    async with async_session_scope(db._sessions) as session:  # noqa: SLF001
+        _submission(session, "k", hotkey="hk-k", block=1)
+        _submission(session, "c", hotkey="hk-c", block=2)
+        session.add(King(king_id="k"))
+        session.add(
+            Challenge(
+                challenger_submission_id="c",
+                king_id="k",
+                status=int(ChallengeStatus.CLOSED),
+            )
+        )
+        session.add(
+            Task(
+                task_id="t1",
+                king_id="k",
+                pool_type=int(PoolType.POOL_ONE),
+                problem_statement="fix it",
+                status_id=int(TaskStatus.QUALIFIED),
+                repo_clone_url="https://github.com/octo/repo.git",
+                parent_sha="p",
+                commit_sha="c",
+                reference_patch="reference",
+                content_fingerprint="fp-t1",
+            )
+        )
+        session.add(
+            TaskScreening(
+                task_id="t1",
+                king_submission_id="k",
+                qualification_solution="qualification patch",
+                king_score=0.4,
+                max_score=0.8,
+            )
+        )
+        await session.flush()
+        session.add(
+            Rollout(
+                rollout_id=rollout_id(
+                    phase="qualification", task_id="t1", submission_id="k"
+                ),
+                phase="qualification",
+                task_id="t1",
+                submission_id="k",
+                success=True,
+                solution_diff="qualification patch",
+                exit_reason="completed",
+                duration_seconds=1.0,
+                usage_summary={"total_tokens": 10},
+                events=[{"index": 0, "type": "llm_call"}],
+            )
+        )
+        session.add(
+            DuelTaskSolution(
+                task_id="t1",
+                challenger_submission_id="c",
+                submission_id="c",
+                solution="legacy duel patch",
+                duration=2.0,
+                exit_reason="completed",
+                usage_summary={"total_tokens": 20},
+            )
+        )
+
+    tasks = await db.export_king_tasks("k")
+    rollouts = [
+        row
+        async for batch in db.stream_king_rollouts("k", batch_size=1)
+        for row in batch
+    ]
+
+    assert tasks[0]["task_id"] == "t1"
+    assert tasks[0]["screening"]["king_score"] == 0.4
+    assert len(rollouts) == 2
+    qualification = next(row for row in rollouts if row["phase"] == "qualification")
+    legacy_duel = next(row for row in rollouts if row["phase"] == "duel")
+    assert qualification["capture_available"] is True
+    assert qualification["events"] == [{"index": 0, "type": "llm_call"}]
+    assert legacy_duel["capture_available"] is False
+    assert legacy_duel["solution_diff"] == "legacy duel patch"
+
+
+async def test_archive_job_claim_retry_and_completion(db: DuelResolverDb) -> None:
+    await _seed_king_and_challenger(db)
+    async with async_session_scope(db._sessions) as session:  # noqa: SLF001
+        session.add(
+            Challenge(
+                challenger_submission_id="c",
+                king_id="k",
+                status=int(ChallengeStatus.POOL_TWO),
+            )
+        )
+    assert await db.promote(_ac("c", "k", PoolType.POOL_TWO), **_ROUND_RULE)
+
+    first = await db.claim_king_archive(lease_seconds=60)
+    assert first is not None
+    assert (first.king_id, first.promoted_to, first.attempt) == ("k", "c", 1)
+    assert await db.claim_king_archive(lease_seconds=60) is None
+    assert await db.retry_king_archive("k", error="temporary", delay_seconds=0)
+
+    second = await db.claim_king_archive(lease_seconds=60)
+    assert second is not None and second.attempt == 2
+    assert await db.complete_king_archive("k")
+    assert await db.claim_king_archive(lease_seconds=60) is None

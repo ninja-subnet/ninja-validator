@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 from tau.proxy import SolveBudget, SolveUsageSummary
 
@@ -52,3 +53,6 @@ class AgentRunResult:
     elapsed_seconds: float
     usage: SolveUsageSummary | None = None
     error: str | None = None
+    # ``None`` means capture was disabled; an empty tuple means it was enabled but
+    # the agent made no proxy-observed LLM call.
+    rollout_events: tuple[dict[str, Any], ...] | None = None

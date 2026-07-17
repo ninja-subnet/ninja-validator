@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+import datetime as dt
+from collections.abc import AsyncIterator, Mapping
+from dataclasses import dataclass
 
-from sqlalchemy import Subquery, and_, func, select, update
+from sqlalchemy import Subquery, and_, func, or_, select, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
@@ -18,13 +20,22 @@ from tau.duel import (
     TokenEfficiencyRound,
     calculate_token_efficiency,
 )
+from tau.huggingface import SCHEMA_VERSION
 from tau.pools import PoolTargets
+from tau.rollouts import rollout_id
 
 from . import models
 from .engine import async_session_factory, async_session_scope, create_async_db_engine
 from .status import ChallengeStatus, DuelOutcome, PoolType, SubmissionStatus, TaskStatus
 
 _ACTIVE_STATUSES = (int(ChallengeStatus.POOL_ONE), int(ChallengeStatus.POOL_TWO))
+
+
+@dataclass(frozen=True, slots=True)
+class KingArchiveJob:
+    king_id: str
+    promoted_to: str
+    attempt: int
 
 
 class DuelResolverDb:
@@ -36,6 +47,275 @@ class DuelResolverDb:
 
     async def aclose(self) -> None:
         await self._engine.dispose()
+
+    async def king_history(self) -> list[str]:
+        """All kings in crown order (the final row is the reigning king)."""
+        async with async_session_scope(self._sessions) as session:
+            rows = await session.scalars(
+                select(models.King.king_id).order_by(
+                    models.King.king_from, models.King.king_id
+                )
+            )
+            return list(rows.all())
+
+    async def claim_king_archive(
+        self, *, lease_seconds: float
+    ) -> KingArchiveJob | None:
+        """Claim one ready archive job, recovering an abandoned processing lease."""
+        now = dt.datetime.now(dt.UTC)
+        stale_before = now - dt.timedelta(seconds=lease_seconds)
+        async with async_session_scope(self._sessions) as session:
+            row = (
+                await session.scalars(
+                    select(models.KingArchive)
+                    .where(
+                        or_(
+                            and_(
+                                models.KingArchive.status == "pending",
+                                models.KingArchive.next_attempt_at <= now,
+                            ),
+                            and_(
+                                models.KingArchive.status == "processing",
+                                models.KingArchive.updated_at <= stale_before,
+                            ),
+                        )
+                    )
+                    .order_by(
+                        models.KingArchive.next_attempt_at,
+                        models.KingArchive.created_at,
+                    )
+                    .with_for_update(skip_locked=True)
+                    .limit(1)
+                )
+            ).first()
+            if row is None:
+                return None
+            row.status = "processing"
+            row.attempts += 1
+            row.updated_at = now
+            row.last_error = None
+            return KingArchiveJob(row.king_id, row.promoted_to, row.attempts)
+
+    async def complete_king_archive(self, king_id: str) -> bool:
+        now = dt.datetime.now(dt.UTC)
+        async with async_session_scope(self._sessions) as session:
+            result = await session.execute(
+                update(models.KingArchive)
+                .where(
+                    models.KingArchive.king_id == king_id,
+                    models.KingArchive.status == "processing",
+                )
+                .values(
+                    status="succeeded",
+                    completed_at=now,
+                    updated_at=now,
+                    last_error=None,
+                )
+            )
+            return bool(result.rowcount)
+
+    async def retry_king_archive(
+        self, king_id: str, *, error: str, delay_seconds: float
+    ) -> bool:
+        now = dt.datetime.now(dt.UTC)
+        async with async_session_scope(self._sessions) as session:
+            result = await session.execute(
+                update(models.KingArchive)
+                .where(
+                    models.KingArchive.king_id == king_id,
+                    models.KingArchive.status == "processing",
+                )
+                .values(
+                    status="pending",
+                    next_attempt_at=now + dt.timedelta(seconds=delay_seconds),
+                    updated_at=now,
+                    last_error=error[-4_000:],
+                )
+            )
+            return bool(result.rowcount)
+
+    async def export_king_tasks(self, king_id: str) -> tuple[dict[str, object], ...]:
+        """Return the retiring king's bounded task metadata."""
+        async with async_session_scope(self._sessions) as session:
+            tasks = list(
+                (
+                    await session.scalars(
+                        select(models.Task)
+                        .where(models.Task.king_id == king_id)
+                        .order_by(
+                            models.Task.created_at,
+                            models.Task.pool_type,
+                            models.Task.task_id,
+                        )
+                    )
+                ).all()
+            )
+            screenings = list(
+                (
+                    await session.scalars(
+                        select(models.TaskScreening)
+                        .join(
+                            models.Task,
+                            models.Task.task_id == models.TaskScreening.task_id,
+                        )
+                        .where(models.Task.king_id == king_id)
+                    )
+                ).all()
+            )
+        screening_by_task = {row.task_id: row for row in screenings}
+        return tuple(
+            _task_dataset_row(task, screening_by_task.get(task.task_id))
+            for task in tasks
+        )
+
+    async def stream_king_rollouts(
+        self, king_id: str, *, batch_size: int
+    ) -> AsyncIterator[tuple[dict[str, object], ...]]:
+        """Yield bounded rollout batches without materializing large JSON bodies.
+
+        Rows are fetched one task at a time so the task/order index can be used and
+        PostgreSQL never has to sort the retiring king's multi-gigabyte wide result.
+        Legacy solution rows are filtered with ``NOT EXISTS`` before their patches
+        cross the database connection.
+        """
+        if batch_size <= 0:
+            raise ValueError("batch_size must be positive")
+        async with async_session_scope(self._sessions) as session:
+            task_ids = list(
+                (
+                    await session.scalars(
+                        select(models.Task.task_id)
+                        .where(models.Task.king_id == king_id)
+                        .order_by(models.Task.task_id)
+                    )
+                ).all()
+            )
+            screenings = list(
+                (
+                    await session.scalars(
+                        select(models.TaskScreening)
+                        .where(models.TaskScreening.task_id.in_(task_ids))
+                        .order_by(models.TaskScreening.task_id)
+                    )
+                ).all()
+            )
+            challenges = dict(
+                (
+                    await session.execute(
+                        select(
+                            models.Challenge.challenger_submission_id,
+                            models.Challenge.king_id,
+                        ).where(models.Challenge.king_id == king_id)
+                    )
+                ).all()
+            )
+            judgement_rows = list(
+                (
+                    await session.scalars(
+                        select(models.Judgement)
+                        .join(
+                            models.Task, models.Task.task_id == models.Judgement.task_id
+                        )
+                        .where(models.Task.king_id == king_id)
+                    )
+                ).all()
+            )
+            judgements = {
+                (row.task_id, row.challenger_submission_id): _judgement_dataset_row(row)
+                for row in judgement_rows
+            }
+            known: set[str] = set()
+            for task_id in task_ids:
+                stmt = (
+                    select(models.Rollout)
+                    .where(models.Rollout.task_id == task_id)
+                    .order_by(models.Rollout.rollout_id)
+                    .execution_options(yield_per=batch_size)
+                )
+                result = await session.stream_scalars(stmt)
+                async for rows in result.partitions(batch_size):
+                    known.update(row.rollout_id for row in rows)
+                    yield tuple(
+                        _rollout_dataset_row(
+                            row,
+                            task_owner_king_id=king_id,
+                            challenge_king_id=challenges.get(
+                                row.challenger_submission_id
+                            ),
+                            judgement=judgements.get(
+                                (row.task_id, row.challenger_submission_id)
+                            ),
+                        )
+                        for row in rows
+                    )
+
+                captured = (
+                    select(models.Rollout.rollout_id)
+                    .where(
+                        models.Rollout.phase == "duel",
+                        models.Rollout.task_id == models.DuelTaskSolution.task_id,
+                        models.Rollout.submission_id
+                        == models.DuelTaskSolution.submission_id,
+                        models.Rollout.challenger_submission_id
+                        == models.DuelTaskSolution.challenger_submission_id,
+                    )
+                    .exists()
+                )
+                legacy_stmt = (
+                    select(models.DuelTaskSolution)
+                    .where(
+                        models.DuelTaskSolution.task_id == task_id,
+                        ~captured,
+                    )
+                    .order_by(
+                        models.DuelTaskSolution.challenger_submission_id,
+                        models.DuelTaskSolution.submission_id,
+                    )
+                    .execution_options(yield_per=batch_size)
+                )
+                legacy_result = await session.stream_scalars(legacy_stmt)
+                async for rows in legacy_result.partitions(batch_size):
+                    yield tuple(
+                        _legacy_rollout_dataset_row(
+                            row,
+                            identity=rollout_id(
+                                phase="duel",
+                                task_id=row.task_id,
+                                submission_id=row.submission_id,
+                                challenger_submission_id=(row.challenger_submission_id),
+                            ),
+                            task_owner_king_id=king_id,
+                            challenge_king_id=challenges.get(
+                                row.challenger_submission_id
+                            ),
+                            judgement=judgements.get(
+                                (row.task_id, row.challenger_submission_id)
+                            ),
+                        )
+                        for row in rows
+                    )
+
+            legacy_qualification: list[dict[str, object]] = []
+            for row in screenings:
+                identity = rollout_id(
+                    phase="qualification",
+                    task_id=row.task_id,
+                    submission_id=row.king_submission_id,
+                )
+                if identity in known:
+                    continue
+                legacy_qualification.append(
+                    _legacy_qualification_rollout_dataset_row(
+                        row,
+                        identity=identity,
+                        task_owner_king_id=king_id,
+                    )
+                )
+                if len(legacy_qualification) == batch_size:
+                    yield tuple(legacy_qualification)
+                    legacy_qualification.clear()
+            if legacy_qualification:
+                yield tuple(legacy_qualification)
 
     async def snapshot(
         self,
@@ -175,6 +455,14 @@ class DuelResolverDb:
             await session.execute(
                 insert(models.King)
                 .values(king_id=challenge.challenger_submission_id)
+                .on_conflict_do_nothing(index_elements=["king_id"])
+            )
+            await session.execute(
+                insert(models.KingArchive)
+                .values(
+                    king_id=challenge.king_submission_id,
+                    promoted_to=challenge.challenger_submission_id,
+                )
                 .on_conflict_do_nothing(index_elements=["king_id"])
             )
             return True
@@ -576,3 +864,176 @@ def _usage_total_tokens(value: object) -> int | None:
     if isinstance(value, bool) or not isinstance(value, int) or value < 0:
         return None
     return value
+
+
+def _iso(value: object) -> str | None:
+    return value.isoformat() if hasattr(value, "isoformat") else None
+
+
+def _task_dataset_row(
+    task: models.Task, screening: models.TaskScreening | None
+) -> dict[str, object]:
+    try:
+        pool = PoolType(task.pool_type).name.lower()
+    except ValueError:
+        pool = "unknown"
+    try:
+        status = TaskStatus(task.status_id).name.lower()
+    except ValueError:
+        status = "unknown"
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "task_id": task.task_id,
+        "task_owner_king_id": task.king_id,
+        "pool": pool,
+        "pool_id": task.pool_type,
+        "status": status,
+        "status_id": task.status_id,
+        "problem_statement": task.problem_statement,
+        "repo_clone_url": task.repo_clone_url,
+        "parent_sha": task.parent_sha,
+        "commit_sha": task.commit_sha,
+        "reference_patch": task.reference_patch,
+        "content_fingerprint": task.content_fingerprint,
+        "created_at": _iso(task.created_at),
+        "generation": {
+            "model": task.model,
+            "fetch_seconds": task.fetch_seconds,
+            "llm_seconds": task.llm_seconds,
+            "llm_attempt": task.llm_attempt,
+            "rejected_duplicate": task.rejected_duplicate,
+            "rejected_structural": task.rejected_structural,
+            "rejected_quality": task.rejected_quality,
+            "rejected_fetch_error": task.rejected_fetch_error,
+        },
+        "screening": (
+            {
+                "king_score": screening.king_score,
+                "max_score": screening.max_score,
+                "reason": screening.reason,
+                "model": screening.model,
+                "failed_runs": screening.failed_runs,
+                "created_at": _iso(screening.created_at),
+                "updated_at": _iso(screening.updated_at),
+            }
+            if screening is not None
+            else None
+        ),
+    }
+
+
+def _judgement_dataset_row(row: models.Judgement) -> dict[str, object]:
+    return {
+        "winner": row.llm_winner,
+        "king_score": row.king_score,
+        "challenger_score": row.challenger_score,
+        "model": row.model,
+        "rationale": row.rationale,
+        "error": row.error,
+        "attempts": row.attempts,
+        "duration_seconds": row.duration_seconds,
+        "created_at": _iso(row.created_at),
+    }
+
+
+def _rollout_role(
+    *, phase: str, submission_id: str, challenge_king_id: str | None
+) -> str:
+    if phase == "qualification":
+        return "qualification"
+    return "king" if submission_id == challenge_king_id else "challenger"
+
+
+def _rollout_dataset_row(
+    row: models.Rollout,
+    *,
+    task_owner_king_id: str,
+    challenge_king_id: str | None,
+    judgement: dict[str, object] | None,
+) -> dict[str, object]:
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "rollout_id": row.rollout_id,
+        "phase": row.phase,
+        "task_id": row.task_id,
+        "task_owner_king_id": task_owner_king_id,
+        "challenge_id": row.challenger_submission_id,
+        "challenge_king_id": challenge_king_id,
+        "submission_id": row.submission_id,
+        "role": _rollout_role(
+            phase=row.phase,
+            submission_id=row.submission_id,
+            challenge_king_id=challenge_king_id,
+        ),
+        "success": row.success,
+        "solution_diff": row.solution_diff,
+        "exit_reason": row.exit_reason,
+        "duration_seconds": row.duration_seconds,
+        "usage": dict(row.usage_summary) if row.usage_summary else None,
+        "capture_available": row.events is not None,
+        "events": list(row.events or []),
+        "created_at": _iso(row.created_at),
+        "judgement": judgement,
+    }
+
+
+def _legacy_qualification_rollout_dataset_row(
+    row: models.TaskScreening,
+    *,
+    identity: str,
+    task_owner_king_id: str,
+) -> dict[str, object]:
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "rollout_id": identity,
+        "phase": "qualification",
+        "task_id": row.task_id,
+        "task_owner_king_id": task_owner_king_id,
+        "challenge_id": None,
+        "challenge_king_id": None,
+        "submission_id": row.king_submission_id,
+        "role": "qualification",
+        "success": True,
+        "solution_diff": row.qualification_solution,
+        "exit_reason": None,
+        "duration_seconds": None,
+        "usage": None,
+        "capture_available": False,
+        "events": [],
+        "created_at": _iso(row.created_at),
+        "judgement": None,
+    }
+
+
+def _legacy_rollout_dataset_row(
+    row: models.DuelTaskSolution,
+    *,
+    identity: str,
+    task_owner_king_id: str,
+    challenge_king_id: str | None,
+    judgement: dict[str, object] | None,
+) -> dict[str, object]:
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "rollout_id": identity,
+        "phase": "duel",
+        "task_id": row.task_id,
+        "task_owner_king_id": task_owner_king_id,
+        "challenge_id": row.challenger_submission_id,
+        "challenge_king_id": challenge_king_id,
+        "submission_id": row.submission_id,
+        "role": _rollout_role(
+            phase="duel",
+            submission_id=row.submission_id,
+            challenge_king_id=challenge_king_id,
+        ),
+        "success": None,
+        "solution_diff": row.solution or "",
+        "exit_reason": row.exit_reason,
+        "duration_seconds": row.duration,
+        "usage": dict(row.usage_summary) if row.usage_summary else None,
+        "capture_available": False,
+        "events": [],
+        "created_at": None,
+        "judgement": judgement,
+    }

@@ -145,6 +145,47 @@ class King(Base):
     tasks: Mapped[list[Task]] = relationship(back_populates="king")
 
 
+class KingArchive(Base):
+    """Persistent, retryable Hugging Face archival job for a retired king."""
+
+    __tablename__ = "king_archives"
+
+    king_id: Mapped[str] = mapped_column(
+        Text,
+        ForeignKey("kings.king_id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    promoted_to: Mapped[str] = mapped_column(
+        Text,
+        ForeignKey("kings.king_id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    status: Mapped[str] = mapped_column(Text, nullable=False, server_default="pending")
+    attempts: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
+    next_attempt_at: Mapped[dt.datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    last_error: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[dt.datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[dt.datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+        onupdate=func.now(),
+    )
+    completed_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True))
+
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('pending', 'processing', 'succeeded')",
+            name="ck_king_archives_status",
+        ),
+        Index("ix_king_archives_ready", "status", "next_attempt_at"),
+    )
+
+
 class Challenge(Base):
     """A challenger submission contesting a king."""
 
@@ -471,6 +512,61 @@ class DuelTaskSolution(Base):
             "task_id",
         ),
         Index("ix_duel_task_solutions_submission_id", "submission_id"),
+    )
+
+
+class Rollout(Base):
+    """A complete terminal agent run, including its redacted LLM-call sequence.
+
+    This is deliberately separate from the live duel cache. It also records task
+    qualification runs, whose patches were historically discarded, and gives the
+    dataset exporter one normalized source for both solve phases.
+    """
+
+    __tablename__ = "rollouts"
+
+    # Deterministic over the solve's semantic identity, so retrying an idempotent DB
+    # write cannot duplicate a rollout.
+    rollout_id: Mapped[str] = mapped_column(Text, primary_key=True)
+    phase: Mapped[str] = mapped_column(Text, nullable=False)
+    task_id: Mapped[str] = mapped_column(
+        Text, ForeignKey("tasks.task_id", ondelete="CASCADE"), nullable=False
+    )
+    submission_id: Mapped[str] = mapped_column(
+        Text,
+        ForeignKey("submissions.submission_id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    # NULL for qualification; set to the challenge identity for duel solves.
+    challenger_submission_id: Mapped[str | None] = mapped_column(
+        Text,
+        ForeignKey("challenges.challenger_submission_id", ondelete="CASCADE"),
+    )
+    # Agent return value, distinct from whether a qualification accepted the task.
+    # Nullable only so backfilled legacy solution rows can express "unknown".
+    success: Mapped[bool | None] = mapped_column(Boolean)
+    solution_diff: Mapped[str] = mapped_column(Text, nullable=False)
+    exit_reason: Mapped[str] = mapped_column(Text, nullable=False)
+    duration_seconds: Mapped[float] = mapped_column(Float, nullable=False)
+    usage_summary: Mapped[dict | None] = mapped_column(JSONB)
+    # Ordered proxy events. Request/response bodies have already had the upstream
+    # key and per-solve auth token redacted before reaching this table.
+    events: Mapped[list | None] = mapped_column(JSONB)
+    created_at: Mapped[dt.datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    __table_args__ = (
+        CheckConstraint("phase IN ('qualification', 'duel')", name="ck_rollouts_phase"),
+        CheckConstraint(
+            "(phase = 'qualification' AND challenger_submission_id IS NULL) OR "
+            "(phase = 'duel' AND challenger_submission_id IS NOT NULL)",
+            name="ck_rollouts_challenge_scope",
+        ),
+        Index("ix_rollouts_task_id", "task_id"),
+        Index("ix_rollouts_task_order", "task_id", "rollout_id"),
+        Index("ix_rollouts_submission_id", "submission_id"),
+        Index("ix_rollouts_challenge", "challenger_submission_id", "task_id"),
     )
 
 

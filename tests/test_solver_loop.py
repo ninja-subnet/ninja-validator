@@ -239,6 +239,23 @@ def test_duel_solution_saves_usage_summary(monkeypatch) -> None:
     }
 
 
+def test_duel_solution_saves_rollout_events(monkeypatch) -> None:
+    result = AgentRunResult(
+        success=True,
+        solution_diff="+added\n",
+        exit_reason=EXIT_COMPLETED,
+        elapsed_seconds=1.0,
+        rollout_events=({"index": 0, "type": "llm_call"},),
+    )
+    _stub_run(monkeypatch, result)
+    db, cfg = _FakeDb(), _config()
+    _duel(db, cfg)
+    assert db.duel_solutions[0]["success"] is True
+    assert db.duel_solutions[0]["rollout_events"] == (
+        {"index": 0, "type": "llm_call"},
+    )
+
+
 # -- Axiom failure routing (_report_failure) ---------------------------------
 class _FakeAxiom:
     def __init__(self) -> None:
@@ -270,6 +287,9 @@ def test_qualification_clone_error_disqualifies_task(monkeypatch) -> None:
             "king_submission_id": "s1",
             "qualified": False,
             "solution": "",
+            "duration": 0.0,
+            "exit_reason": "task_setup_failed",
+            "success": False,
         }
     ]
     assert fake.exceptions[0]["event_type"] == "qualification_task_setup_failed"

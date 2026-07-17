@@ -12,6 +12,8 @@ from tau.db.models import (
     DuelTaskSolution,
     Judgement,
     King,
+    KingArchive,
+    Rollout,
     Submission,
     SubmissionQualification,
     Task,
@@ -253,6 +255,39 @@ def test_duel_task_solution_is_scoped_to_challenge() -> None:
         "challenger_submission_id",
     ) in fk_targets
     assert ("submission_id", "submissions", "submission_id") in fk_targets
+
+
+def test_rollout_table_has_normalized_capture_shape() -> None:
+    assert [c.name for c in Rollout.__table__.primary_key.columns] == ["rollout_id"]
+    assert {
+        "phase",
+        "task_id",
+        "submission_id",
+        "challenger_submission_id",
+        "success",
+        "solution_diff",
+        "exit_reason",
+        "duration_seconds",
+        "usage_summary",
+        "events",
+        "created_at",
+    } <= set(Rollout.__table__.columns.keys())
+    assert Rollout.__table__.c.events.nullable is True
+    indexes = {index.name for index in Rollout.__table__.indexes}
+    assert "ix_rollouts_task_order" in indexes
+
+
+def test_king_archive_table_is_a_persistent_retry_queue() -> None:
+    assert [c.name for c in KingArchive.__table__.primary_key.columns] == ["king_id"]
+    assert {
+        "promoted_to",
+        "status",
+        "attempts",
+        "next_attempt_at",
+        "last_error",
+        "updated_at",
+        "completed_at",
+    } <= set(KingArchive.__table__.columns.keys())
 
 
 def test_duel_resolution_keeps_raw_token_and_merged_scores() -> None:
