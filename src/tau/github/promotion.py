@@ -159,6 +159,8 @@ async def publish_agent_files_commit(
         {"base_tree": base_tree_sha, "tree": tree_entries},
     )
     new_tree_sha = _payload_sha(tree_payload, "GitHub tree create")
+    if new_tree_sha == base_tree_sha:
+        return base_head_sha
     new_commit_payload = await client.post_json(
         f"/repos/{repo}/git/commits",
         {"message": message, "tree": new_tree_sha, "parents": [base_head_sha]},

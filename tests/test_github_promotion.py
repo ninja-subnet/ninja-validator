@@ -14,7 +14,8 @@ NEW_COMMIT = "d" * 40
 
 
 class FakeGitHubClient:
-    def __init__(self) -> None:
+    def __init__(self, *, new_tree: str = NEW_TREE) -> None:
+        self.new_tree = new_tree
         self.posts: list[tuple[str, Any]] = []
         self.patches: list[tuple[str, Any]] = []
 
@@ -34,7 +35,7 @@ class FakeGitHubClient:
     async def post_json(self, path: str, payload: Any) -> Any:
         self.posts.append((path, payload))
         if path == "/repos/octo/published/git/trees":
-            return {"sha": NEW_TREE}
+            return {"sha": self.new_tree}
         if path == "/repos/octo/published/git/commits":
             return {"sha": NEW_COMMIT}
         raise AssertionError(f"unexpected POST {path}")
@@ -74,3 +75,28 @@ async def test_publisher_commits_submission_bundle_and_manifest(tmp_path: Path) 
             {"sha": NEW_COMMIT, "force": False},
         )
     ]
+
+
+async def test_publisher_skips_commit_when_submission_tree_is_unchanged(
+    tmp_path: Path,
+) -> None:
+    bundle = tmp_path / "submissions" / "winner"
+    bundle.mkdir(parents=True)
+    (bundle / "agent.py").write_text(
+        "def solve(repo_path, issue, model, api_base, api_key):\n    return {}\n"
+    )
+    client = FakeGitHubClient(new_tree=TREE)
+    publisher = GitHubPromotionPublisher(
+        client,
+        PromotionPublishConfig(
+            submissions_dir=tmp_path / "submissions", repo="octo/published"
+        ),
+    )
+
+    published = await publisher.publish_submission("winner")
+
+    assert published.commit_sha == BASE
+    assert [path for path, _ in client.posts] == [
+        "/repos/octo/published/git/trees"
+    ]
+    assert client.patches == []
